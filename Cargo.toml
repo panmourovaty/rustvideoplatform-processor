@@ -1,0 +1,13 @@
+[package]
+name = "rustvideoplatform-processor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mimalloc = { version = "*", features = ["secure"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "*"
+sqlx = { version = "0.8", features = [ "postgres", "runtime-tokio-rustls" ] }
+rand = "0.8"
+ffmpeg-next = "6.1"
