@@ -6,12 +6,12 @@ use std::fs;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 use ffmpeg_next::{codec, format, media};
+use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use std::process::{Command,Stdio};
-use rand::Rng;
+use std::process::{Command, Stdio};
 
 #[derive(Deserialize, Clone)]
 struct Config {
@@ -28,7 +28,7 @@ async fn main() {
         .await
         .unwrap();
 
-        process(pool).await;
+    process(pool).await;
 }
 
 async fn process(pool: PgPool) {
@@ -167,31 +167,29 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
 
     fs::create_dir_all(&dash_output_dir).expect("Failed to create DASH output directory");
 
-    if webm_files.len() >= 3 {
-        let dash_input_cmds = webm_files
-            .iter()
-            .map(|file| format!("-i {}", file))
-            .collect::<Vec<String>>()
-            .join(" ");
+    let dash_input_cmds = webm_files
+        .iter()
+        .map(|file| format!("-i {}", file))
+        .collect::<Vec<String>>()
+        .join(" ");
 
-        let mut maps: String = String::new();
-        for track_num in 0..quality_steps {
-            maps.push_str(format!(" -map {}:v -map {}:a ", track_num, track_num).as_str())
-        }
+    let mut maps: String = String::new();
+    for track_num in 0..quality_steps {
+        maps.push_str(format!(" -map {}:v -map {}:a ", track_num, track_num).as_str())
+    }
 
-        let dash_output_cmd = format!(
+    let dash_output_cmd = format!(
             "ffmpeg -y {} {} -c copy -f dash -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
             dash_input_cmds, maps, dash_output_dir
         );
 
-        println!("Creating WebM DASH manifest...");
-        Command::new("sh")
-            .arg("-c")
-            .arg(dash_output_cmd)
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("Failed to create WebM DASH stream");
-    }
+    println!("Creating WebM DASH manifest...");
+    Command::new("sh")
+        .arg("-c")
+        .arg(dash_output_cmd)
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("Failed to create WebM DASH stream");
 
     // smazat mezividea
     println!("Remove WebM files...");
