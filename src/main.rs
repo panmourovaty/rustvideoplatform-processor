@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 #[derive(Deserialize, Clone)]
 struct Config {
@@ -192,7 +192,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     
     //OGP video
     fs::rename("quarter_resolution.webm", "video/video.webm");
-    webm_files.remove("quarter_resolution");
+    webm_files.remove(2);
 
     // smazat mezividea
     println!("Remove WebM files...");
