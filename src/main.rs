@@ -159,9 +159,10 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     Command::new("sh")
         .arg("-c")
         .arg(&cmd)
-        .spawn()
+        .status()
         .expect("Failed to execute ffmpeg command");
 
+    println!("Creating WebM DASH manifest...");
     webm_files.retain(|file| fs::metadata(file).is_ok());
 
     fs::create_dir_all(&dash_output_dir).expect("Failed to create DASH output directory");
@@ -182,11 +183,11 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
             dash_input_cmds, maps, dash_output_dir
         );
 
-    println!("Creating WebM DASH manifest...");
+    println!("Executing: {}", dash_output_cmd);
     Command::new("sh")
         .arg("-c")
         .arg(dash_output_cmd)
-        .spawn()
+        .status()
         .expect("Failed to create WebM DASH stream");
 
     // smazat mezividea
@@ -207,7 +208,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     Command::new("sh")
         .arg("-c")
         .arg(thumbnail_cmd)
-        .spawn()
+        .status()
         .expect("Failed to generate thumbnails");
 
     // generovat previews
@@ -244,7 +245,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     Command::new("sh")
         .arg("-c")
         .arg(preview_cmd)
-        .spawn()
+        .status()
         .expect("Failed to generate previews");
 
     Ok(())
