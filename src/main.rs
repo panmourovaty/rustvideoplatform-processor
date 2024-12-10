@@ -159,7 +159,6 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     Command::new("sh")
         .arg("-c")
         .arg(&cmd)
-        .stdout(Stdio::null())
         .spawn()
         .expect("Failed to execute ffmpeg command");
 
@@ -187,7 +186,6 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     Command::new("sh")
         .arg("-c")
         .arg(dash_output_cmd)
-        .stdout(Stdio::null())
         .spawn()
         .expect("Failed to create WebM DASH stream");
 
@@ -209,7 +207,6 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     Command::new("sh")
         .arg("-c")
         .arg(thumbnail_cmd)
-        .stdout(Stdio::null())
         .spawn()
         .expect("Failed to generate thumbnails");
 
@@ -247,7 +244,6 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     Command::new("sh")
         .arg("-c")
         .arg(preview_cmd)
-        .stdout(Stdio::null())
         .spawn()
         .expect("Failed to generate previews");
 
