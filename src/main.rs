@@ -66,6 +66,7 @@ async fn process_video(concept_id: String, pool: PgPool) {
         .execute(&pool)
         .await
         .expect("Database error");
+        fs::remove_file(format!("upload/{}", concept_id).as_str());
     }
 }
 
@@ -191,7 +192,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         .expect("Failed to create WebM DASH stream");
     
     //OGP video
-    let _ = fs::rename("quarter_resolution.webm", "video/video.webm");
+    let _ = fs::rename("output_quarter_resolution.webm", "video/video.webm");
     webm_files.remove(2);
 
     // smazat mezividea
