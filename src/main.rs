@@ -191,7 +191,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         .expect("Failed to create WebM DASH stream");
     
     //OGP video
-    fs::rename("quarter_resolution.webm", "video/video.webm");
+    let _ = fs::rename("quarter_resolution.webm", "video/video.webm");
     webm_files.remove(2);
 
     // smazat mezividea
