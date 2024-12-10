@@ -197,7 +197,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         format!("{}/video/video.webm", output_dir),
     );
     webm_files.remove(2);
-    println!(format!("CREATED OGP VIDEO: {:?}", ogp_video_result));
+    println!("CREATED OGP VIDEO: {:?}", ogp_video_result);
 
     // smazat mezividea
     println!("Remove WebM files...");
