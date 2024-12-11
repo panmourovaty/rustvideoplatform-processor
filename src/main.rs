@@ -180,7 +180,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     }
 
     let dash_output_cmd = format!(
-            "ffmpeg -y {} {} -c copy -f dash -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
+            "ffmpeg -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
             dash_input_cmds, maps, dash_output_dir
         );
 
