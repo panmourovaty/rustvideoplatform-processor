@@ -152,7 +152,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     for (w, h, label, bitrate, max_bitrate, min_bitrate, audio_bitrate) in outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        cmd.push_str(format!(" -vf 'scale_vaapi={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
+        cmd.push_str(format!(" -vf 'scale_vaapi=w={}:h={}:format=nv12,fps={},hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
         w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_bitrate, output_file).as_str());
     }
 
@@ -210,7 +210,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
     let thumbnail_cmd = format!(
-        "ffmpeg -y -ss {:.2} -i {} -vf 'scale_vaapi=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 {}/thumbnail.avif",
+        "ffmpeg -y -ss {:.2} -i {} -vf 'scale_vaapi=w=1920:h=1080,hwupload' -frames:v 1 {}/thumbnail.jpg -frames:v 1 {}/thumbnail.avif",
         random_time, input_file, output_dir, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -247,7 +247,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     .expect("Unable to write file");
 
     let preview_cmd = format!(
-        "ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -vaapi_device /dev/dri/renderD128 -i {} -vf \"fps=1/10,scale_vaapi=320:180,format=nv12\" -vsync vfr -q:v 10 -f image2 -c:v av1_vaapi \"{}/preview%d.avif\"",
+        "ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -vaapi_device /dev/dri/renderD128 -i {} -vf \"fps=1/10,scale_vaapi=w=320:h=180:format=nv12,hwupload\" -vsync vfr -q:v 10 -f image2 -c:v av1_vaapi \"{}/preview%d.avif\"",
         input_file, preview_output_dir
     );
     println!("Executing: {}", preview_cmd);
