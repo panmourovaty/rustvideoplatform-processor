@@ -152,7 +152,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     for (w, h, label, bitrate, max_bitrate, min_bitrate, audio_bitrate) in outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
+        cmd.push_str(format!(" -vf 'scale_vaapi={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
         w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_bitrate, output_file).as_str());
     }
 
@@ -210,7 +210,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
     let thumbnail_cmd = format!(
-        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 {}/thumbnail.avif",
+        "ffmpeg -y -ss {:.2} -i {} -vf 'scale_vaapi=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 {}/thumbnail.avif",
         random_time, input_file, output_dir, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
