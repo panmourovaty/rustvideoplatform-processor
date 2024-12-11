@@ -247,7 +247,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     .expect("Unable to write file");
 
     let preview_cmd = format!(
-        "ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -vaapi_device /dev/dri/renderD128 -i {} -vf \"fps=1/10,scale=320:180,format=nv12\" -vsync vfr -q:v 10 -f image2 -c:v av1_vaapi \"{}/preview%d.avif\"",
+        "ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -vaapi_device /dev/dri/renderD128 -i {} -vf \"fps=1/10,scale=320:180,format=nv12,hwupload\" -vsync vfr -q:v 10 -f image2 -c:v av1_vaapi \"{}/preview%d.avif\"",
         input_file, preview_output_dir
     );
     println!("Executing: {}", preview_cmd);
