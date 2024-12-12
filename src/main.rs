@@ -210,7 +210,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
     let thumbnail_cmd = format!(
-        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 {}/thumbnail.avif",
+        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 -c:v libsvtav1 -pix_fmt yuv420p {}/thumbnail.avif",
         random_time, input_file, output_dir, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -247,7 +247,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     .expect("Unable to write file");
 
     let preview_cmd = format!(
-        "ffmpeg -i {} -c:v libsvtav1 -vf \"fps=1/10,scale=320:180\" -vsync vfr -q:v 10 -f image2 \"{}/preview%d.avif\"",
+        "ffmpeg -i {} -c:v libsvtav1 -pix_fmt yuv420p -vf \"fps=1/10,scale=320:180\" -vsync vfr -q:v 10 -f image2 \"{}/preview%d.avif\"",
         input_file, preview_output_dir
     );
     println!("Executing: {}", preview_cmd);
