@@ -247,7 +247,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     .expect("Unable to write file");
 
     let preview_cmd = format!(
-        "ffmpeg -i {} -c:v librav1e -vf \"fps=1/10,scale=320:180\" -vsync vfr -q:v 10 -f image2 \"{}/preview%d.avif\"",
+        "ffmpeg -i {} -c:v libsvtav1 -vf \"fps=1/10,scale=320:180\" -vsync vfr -q:v 10 -f image2 \"{}/preview%d.avif\"",
         input_file, preview_output_dir
     );
     println!("Executing: {}", preview_cmd);
