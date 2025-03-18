@@ -44,8 +44,11 @@ async fn process(pool: PgPool) {
 
         for concept in unprocessed_concepts {
             if concept.r#type == "video".to_owned() {
-                println!("processing concept: {}", concept.id);
+                println!("processing concept: {} as video", concept.id);
                 process_video(concept.id, pool.clone()).await;
+            } else if concept.r#type == "picture".to_owned() {
+                println!("processing concept: {} as picture", concept.id);
+                process_picture(concept.id, pool.clone()).await;
             }
         }
     }
@@ -68,6 +71,62 @@ async fn process_video(concept_id: String, pool: PgPool) {
         .expect("Database error");
         let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
     }
+}
+
+async fn process_picture(concept_id: String, pool: PgPool) {
+    fs::create_dir_all(format!("upload/{}_processing", &concept_id))
+        .expect("Failed to create concept processing result directory");
+    let transcode_result = transcode_picture(
+        format!("upload/{}", concept_id).as_str(),
+        format!("upload/{}_processing", concept_id).as_str(),
+    );
+    if transcode_result.is_ok() {
+        sqlx::query!(
+            "UPDATE media_concepts SET processed = true WHERE id = $1;",
+            concept_id
+        )
+        .execute(&pool)
+        .await
+        .expect("Database error");
+        let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+    }
+}
+
+fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
+    let transcode_cmd = format!(
+        "ffmpeg -i {} -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif",
+        input_file, output_dir
+    );
+    println!("Executing: {}", transcode_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(transcode_cmd)
+        .status()
+        .expect("Failed to transcode picture");
+
+    let thumbnail_cmd = format!(
+            "ffmpeg -i {} -c:v libaom-av1 -crf 30 -vf 'scale=1920:1080' -pix_fmt yuv420p -b:v 0 {}/thumbnail.avif",
+            input_file, output_dir
+        );
+    println!("Executing: {}", thumbnail_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(thumbnail_cmd)
+        .status()
+        .expect("Failed to transcode picture thumbnail");
+
+    let thumbnail_ogp_cmd = format!(
+        "ffmpeg -i {} -vf 'scale=1920:1080' -q:v 25 {}/thumbnail.jpg",
+        input_file, output_dir
+    );
+    println!("Executing: {}", thumbnail_ogp_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(thumbnail_ogp_cmd)
+        .status()
+        .expect("Failed to transcode picture thumbnail for OGP");
+
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
