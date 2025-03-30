@@ -150,8 +150,8 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     let original_width = video_decoder.width();
     let original_height = video_decoder.height();
     let framerate: f32;
-    if video_stream.avg_frame_rate().0 as f32 > 60.0 {
-        framerate = 60.0;
+    if video_stream.avg_frame_rate().0 as f32 > 120.0 {
+        framerate = 120.0;
     } else {
         framerate = video_stream.avg_frame_rate().0 as f32;
     }
