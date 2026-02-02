@@ -31,6 +31,122 @@ async fn main() {
     process(pool).await;
 }
 
+fn detect_file_type(input_file: &str) -> Option<String> {
+    // Check for video stream
+    let video_probe_cmd = format!(
+        "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    // Check for audio stream
+    let audio_probe_cmd = format!(
+        "ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    let video_output = Command::new("sh").arg("-c").arg(&video_probe_cmd).output();
+    let audio_output = Command::new("sh").arg("-c").arg(&audio_probe_cmd).output();
+
+    let has_video = match video_output {
+        Ok(result) if result.status.success() => {
+            let output_str = String::from_utf8_lossy(&result.stdout);
+            output_str.contains("video")
+        }
+        _ => false,
+    };
+
+    let has_audio = match audio_output {
+        Ok(result) if result.status.success() => {
+            let output_str = String::from_utf8_lossy(&result.stdout);
+            output_str.contains("audio")
+        }
+        _ => false,
+    };
+
+    if !has_video && !has_audio {
+        return None;
+    }
+
+    // If we have audio and no video, it's an audio file
+    if has_audio && !has_video {
+        return Some("audio".to_string());
+    }
+
+    // If we have both, determine if video is just cover art or actual video
+    if has_video && has_audio {
+        // Check duration - if video duration is very short compared to audio,
+        // it's likely just cover art for an audio file
+        let duration_cmd = format!(
+            "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            input_file
+        );
+
+        let dur_result = Command::new("sh").arg("-c").arg(&duration_cmd).output();
+
+        match dur_result {
+            Ok(dur_res) if dur_res.status.success() => {
+                let dur_str = String::from_utf8_lossy(&dur_res.stdout);
+                let duration: f64 = dur_str.trim().parse().unwrap_or(0.0);
+                // If duration is very short (<=1s), likely just cover art
+                if duration <= 1.0 {
+                    return Some("audio".to_string());
+                }
+            }
+            _ => {}
+        }
+
+        // Check frame count to differentiate video from static image
+        let frame_cmd = format!(
+            "ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of default=noprint_wrappers=1:nokey=1 {}",
+            input_file
+        );
+
+        let frame_output = Command::new("sh").arg("-c").arg(&frame_cmd).output();
+
+        match frame_output {
+            Ok(frame_result) if frame_result.status.success() => {
+                let frame_str = String::from_utf8_lossy(&frame_result.stdout);
+                let frame_count: i32 = frame_str.trim().parse().unwrap_or(1);
+                if frame_count > 1 {
+                    return Some("video".to_string());
+                } else {
+                    // Single frame video stream with audio = audio file with cover art
+                    return Some("audio".to_string());
+                }
+            }
+            _ => {
+                // If frame counting fails, fall back to duration check
+                let duration_cmd = format!(
+                    "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+                    input_file
+                );
+
+                let dur_result = Command::new("sh").arg("-c").arg(&duration_cmd).output();
+
+                match dur_result {
+                    Ok(dur_res) if dur_res.status.success() => {
+                        let dur_str = String::from_utf8_lossy(&dur_res.stdout);
+                        let duration: f64 = dur_str.trim().parse().unwrap_or(0.0);
+                        if duration > 5.0 {
+                            return Some("video".to_string());
+                        } else {
+                            return Some("audio".to_string());
+                        }
+                    }
+                    _ => return Some("audio".to_string()),
+                }
+            }
+        }
+    }
+
+    // Only video stream (no audio)
+    if has_video {
+        return Some("picture".to_string());
+    }
+
+    return None;
+}
+
 async fn process(pool: PgPool) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
 
@@ -43,12 +159,25 @@ async fn process(pool: PgPool) {
                 .expect("Database error");
 
         for concept in unprocessed_concepts {
-            if concept.r#type == "video".to_owned() {
+            let input_file = format!("upload/{}", concept.id);
+            let detected_type = detect_file_type(&input_file);
+
+            // Override database type if detection yields different result
+            let actual_type = if let Some(dt) = detected_type {
+                dt
+            } else {
+                concept.r#type.clone()
+            };
+
+            if actual_type == "video".to_owned() {
                 println!("processing concept: {} as video", concept.id);
                 process_video(concept.id, pool.clone()).await;
-            } else if concept.r#type == "picture".to_owned() {
+            } else if actual_type == "picture".to_owned() {
                 println!("processing concept: {} as picture", concept.id);
                 process_picture(concept.id, pool.clone()).await;
+            } else if actual_type == "audio".to_owned() {
+                println!("processing concept: {} as audio", concept.id);
+                process_audio(concept.id, pool.clone()).await;
             }
         }
     }
@@ -92,7 +221,43 @@ async fn process_picture(concept_id: String, pool: PgPool) {
     }
 }
 
+async fn process_audio(concept_id: String, pool: PgPool) {
+    fs::create_dir_all(format!("upload/{}_processing", &concept_id))
+        .expect("Failed to create concept processing result directory");
+    let transcode_result = transcode_audio(
+        format!("upload/{}", concept_id).as_str(),
+        format!("upload/{}_processing", concept_id).as_str(),
+    );
+    if transcode_result.is_ok() {
+        sqlx::query!(
+            "UPDATE media_concepts SET processed = true WHERE id = $1;",
+            concept_id
+        )
+        .execute(&pool)
+        .await
+        .expect("Database error");
+        let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+    }
+}
+
 fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
+    // Get image dimensions
+    let probe_cmd = format!(
+        "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+        input_file
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&probe_cmd)
+        .output()
+        .expect("Failed to probe image dimensions");
+    let dimensions = String::from_utf8_lossy(&output.stdout);
+    let (orig_width, orig_height) = parse_dimensions(&dimensions);
+
+    // Calculate scaled dimensions for HD thumbnail (closest to 1920x1080 while maintaining aspect ratio)
+    let (thumb_width, thumb_height) = calculate_hd_scale(orig_width, orig_height);
+
+    // Full resolution AVIF
     let transcode_cmd = format!(
         "ffmpeg -i {} -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif",
         input_file, output_dir
@@ -104,9 +269,10 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
         .status()
         .expect("Failed to transcode picture");
 
+    // HD thumbnail AVIF with proper aspect ratio
     let thumbnail_cmd = format!(
-            "ffmpeg -i {} -c:v libaom-av1 -crf 30 -vf 'scale=1920:1080' -pix_fmt yuv420p -b:v 0 {}/thumbnail.avif",
-            input_file, output_dir
+            "ffmpeg -i {} -c:v libaom-av1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif",
+            input_file, thumb_width, thumb_height, output_dir
         );
     println!("Executing: {}", thumbnail_cmd);
     Command::new("sh")
@@ -115,9 +281,10 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
         .status()
         .expect("Failed to transcode picture thumbnail");
 
+    // HD thumbnail JPG for older devices
     let thumbnail_ogp_cmd = format!(
-        "ffmpeg -i {} -vf 'scale=1920:1080' -q:v 25 {}/thumbnail.jpg",
-        input_file, output_dir
+        "ffmpeg -i {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 {}/thumbnail.jpg",
+        input_file, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_ogp_cmd);
     Command::new("sh")
@@ -127,6 +294,373 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
         .expect("Failed to transcode picture thumbnail for OGP");
 
     Ok(())
+}
+
+fn parse_dimensions(dim_output: &str) -> (u32, u32) {
+    let cleaned = dim_output.trim();
+    let parts: Vec<&str> = cleaned.split('x').collect();
+    if parts.len() == 2 {
+        let width = parts[0].parse().unwrap_or(1280);
+        let height = parts[1].parse().unwrap_or(720);
+        return (width, height);
+    }
+    (1280, 720) // Default fallback
+}
+
+fn get_audio_codec(input_file: &str) -> String {
+    let codec_cmd = format!(
+        "ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    let output = Command::new("sh").arg("-c").arg(&codec_cmd).output();
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let codec = String::from_utf8_lossy(&result.stdout);
+            codec.trim().to_lowercase()
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+fn get_audio_bitrate(input_file: &str) -> u32 {
+    let bitrate_cmd = format!(
+        "ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    let output = Command::new("sh").arg("-c").arg(&bitrate_cmd).output();
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let bitrate_str = String::from_utf8_lossy(&result.stdout);
+            bitrate_str.trim().parse().unwrap_or(128000)
+        }
+        _ => 128000, // Default to 128 kbps if unknown
+    }
+}
+
+fn has_video_stream(input_file: &str) -> bool {
+    let probe_cmd = format!(
+        "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    match Command::new("sh").arg("-c").arg(&probe_cmd).output() {
+        Ok(result) if result.status.success() => {
+            let output_str = String::from_utf8_lossy(&result.stdout);
+            output_str.contains("video")
+        }
+        _ => false,
+    }
+}
+
+fn is_cover_art_video(input_file: &str) -> bool {
+    // Check if video stream duration is very short compared to audio
+    // This typically indicates cover art/album art in a music file
+    let duration_cmd = format!(
+        "ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    match Command::new("sh").arg("-c").arg(&duration_cmd).output() {
+        Ok(result) if result.status.success() => {
+            let dur_str = String::from_utf8_lossy(&result.stdout);
+            match dur_str.trim().parse::<f64>() {
+                Ok(duration) if duration <= 1.0 => true,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn count_audio_streams(input_file: &str) -> u32 {
+    let count_cmd = format!(
+        "ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 {} | wc -l",
+        input_file
+    );
+
+    match Command::new("sh").arg("-c").arg(&count_cmd).output() {
+        Ok(result) if result.status.success() => {
+            let count_str = String::from_utf8_lossy(&result.stdout);
+            count_str.trim().parse().unwrap_or(1)
+        }
+        _ => 1,
+    }
+}
+
+fn count_video_streams(input_file: &str) -> u32 {
+    let count_cmd = format!(
+        "ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 {} | wc -l",
+        input_file
+    );
+
+    match Command::new("sh").arg("-c").arg(&count_cmd).output() {
+        Ok(result) if result.status.success() => {
+            let count_str = String::from_utf8_lossy(&result.stdout);
+            count_str.trim().parse().unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+fn extract_additional_audio(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
+    // Get total number of audio streams
+    let count_cmd = format!(
+        "ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 {}",
+        input_file
+    );
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&count_cmd)
+        .output()
+        .expect("Failed to count audio streams");
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let streams: Vec<&str> = output_str.trim().split('\n').collect();
+
+    // Skip the first audio stream (usually the main one) and process additional ones
+    for (idx, _) in streams.iter().enumerate().skip(1) {
+        let stream_idx = idx; // 0-based index for ffmpeg (stream 1 is index 0)
+        let audio_codec = get_audio_codec_for_stream(input_file, stream_idx as u32);
+
+        let bitrate = if audio_codec == "flac" || audio_codec == "wav" || audio_codec == "pcm_s16le"
+        {
+            "300k"
+        } else {
+            "256k"
+        };
+
+        let output_path = format!("{}/audio_{}.ogg", output_dir, idx + 1);
+        let extract_cmd = format!(
+            "ffmpeg -i {} -map 0:a:{} -c:a libopus -b:a {} -vbr on -application audio {} -y",
+            input_file, stream_idx, bitrate, output_path
+        );
+
+        println!("Executing: {}", extract_cmd);
+        Command::new("sh")
+            .arg("-c")
+            .arg(&extract_cmd)
+            .status()
+            .expect(&format!("Failed to extract audio stream {}", idx + 1));
+    }
+
+    Ok(())
+}
+
+fn get_audio_codec_for_stream(input_file: &str, stream_idx: u32) -> String {
+    let codec_cmd = format!(
+        "ffprobe -v error -select_streams a:{} -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 {}",
+        stream_idx, input_file
+    );
+
+    let output = Command::new("sh").arg("-c").arg(&codec_cmd).output();
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let codec = String::from_utf8_lossy(&result.stdout);
+            codec.trim().to_lowercase()
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+fn extract_secondary_video_as_cover(
+    input_file: &str,
+    output_dir: &str,
+) -> Result<(), ffmpeg_next::Error> {
+    // Get dimensions of the secondary video stream (usually the cover art)
+    let probe_cmd = format!(
+        "ffprobe -v error -select_streams v:1 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+        input_file
+    );
+
+    let output = Command::new("sh").arg("-c").arg(&probe_cmd).output();
+
+    let (orig_width, orig_height) = match output {
+        Ok(result) if result.status.success() => {
+            let dimensions = String::from_utf8_lossy(&result.stdout);
+            parse_dimensions(&dimensions)
+        }
+        _ => {
+            // Fallback to first video stream
+            let probe_cmd = format!(
+                "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+                input_file
+            );
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(&probe_cmd)
+                .output()
+                .expect("Failed to probe video dimensions");
+            let dimensions = String::from_utf8_lossy(&output.stdout);
+            parse_dimensions(&dimensions)
+        }
+    };
+
+    // Calculate scaled dimensions for HD thumbnail
+    let (thumb_width, thumb_height) = calculate_hd_scale(orig_width, orig_height);
+
+    // Check if we have multiple video streams
+    let video_count = count_video_streams(input_file);
+    let stream_selector = if video_count > 1 { "v:1" } else { "v:0" };
+
+    // Extract full resolution cover
+    let cover_cmd = format!(
+        "ffmpeg -i {} -map 0:{} -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif -y",
+        input_file, stream_selector, output_dir
+    );
+    println!("Executing: {}", cover_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(&cover_cmd)
+        .status()
+        .expect("Failed to extract cover art");
+
+    // Create thumbnail AVIF
+    let thumbnail_cmd = format!(
+        "ffmpeg -i {} -map 0:{} -c:v libaom-av1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
+        input_file, stream_selector, thumb_width, thumb_height, output_dir
+    );
+    println!("Executing: {}", thumbnail_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(&thumbnail_cmd)
+        .status()
+        .expect("Failed to create cover thumbnail");
+
+    // Create thumbnail JPG for older devices
+    let thumbnail_jpg_cmd = format!(
+        "ffmpeg -i {} -map 0:{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 {}/thumbnail.jpg -y",
+        input_file, stream_selector, thumb_width, thumb_height, output_dir
+    );
+    println!("Executing: {}", thumbnail_jpg_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(&thumbnail_jpg_cmd)
+        .status()
+        .expect("Failed to create cover thumbnail JPG");
+
+    Ok(())
+}
+
+fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
+    // Get album cover dimensions
+    let probe_cmd = format!(
+        "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+        input_file
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&probe_cmd)
+        .output()
+        .expect("Failed to probe album cover dimensions");
+    let dimensions = String::from_utf8_lossy(&output.stdout);
+    let (orig_width, orig_height) = parse_dimensions(&dimensions);
+
+    // Calculate scaled dimensions for HD thumbnail
+    let (thumb_width, thumb_height) = calculate_hd_scale(orig_width, orig_height);
+
+    // Extract full resolution album cover
+    let cover_cmd = format!(
+        "ffmpeg -i {} -map 0:v:0 -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif -y",
+        input_file, output_dir
+    );
+    println!("Executing: {}", cover_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(cover_cmd)
+        .status()
+        .expect("Failed to extract album cover");
+
+    // Create thumbnail AVIF
+    let thumbnail_cmd = format!(
+        "ffmpeg -i {} -map 0:v:0 -c:v libaom-av1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
+        input_file, thumb_width, thumb_height, output_dir
+    );
+    println!("Executing: {}", thumbnail_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(thumbnail_cmd)
+        .status()
+        .expect("Failed to create album cover thumbnail");
+
+    // Create thumbnail JPG for older devices
+    let thumbnail_jpg_cmd = format!(
+        "ffmpeg -i {} -map 0:v:0 -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 {}/thumbnail.jpg -y",
+        input_file, thumb_width, thumb_height, output_dir
+    );
+    println!("Executing: {}", thumbnail_jpg_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(thumbnail_jpg_cmd)
+        .status()
+        .expect("Failed to create album cover thumbnail JPG");
+
+    Ok(())
+}
+
+fn transcode_audio(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
+    // Detect source codec to determine bitrate
+    let source_codec = get_audio_codec(input_file);
+    println!("Detected audio codec: {}", source_codec);
+
+    // FLAC and WAV get higher bitrate (300 kb/s), others use 256 kb/s
+    let bitrate = if source_codec == "flac" || source_codec == "wav" || source_codec == "pcm_s16le"
+    {
+        "300k"
+    } else {
+        "256k"
+    };
+
+    println!("Using bitrate: {} for {} codec", bitrate, source_codec);
+
+    // Transcode to OGG with Opus
+    let output_path = format!("{}/audio.ogg", output_dir);
+    let transcode_cmd = format!(
+        "ffmpeg -i {} -c:a libopus -b:a {} -vbr on -application audio {} -y",
+        input_file, bitrate, output_path
+    );
+    println!("Executing: {}", transcode_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(transcode_cmd)
+        .status()
+        .expect("Failed to transcode audio");
+
+    // Check if audio file has embedded album cover (video stream)
+    if has_video_stream(input_file) {
+        println!("Found album cover in audio file, extracting...");
+        let _ = extract_album_cover(input_file, output_dir);
+    }
+
+    Ok(())
+}
+
+fn calculate_hd_scale(width: u32, height: u32) -> (u32, u32) {
+    // HD resolution is 1920x1080
+    let target_width: u32 = 1280;
+    let target_height: u32 = 720;
+
+    // Calculate aspect ratios
+    let aspect_ratio = width as f32 / height as f32;
+    let target_aspect = target_width as f32 / target_height as f32;
+
+    let (new_width, new_height) = if aspect_ratio > target_aspect {
+        // Image is wider than 16:9, scale by width
+        let scaled_height = (target_width as f32 / aspect_ratio) as u32;
+        (target_width, scaled_height.min(target_height))
+    } else {
+        // Image is taller than 16:9, scale by height
+        let scaled_width = (target_height as f32 * aspect_ratio) as u32;
+        (scaled_width.min(target_width), target_height)
+    };
+
+    // Ensure dimensions are even (required for some codecs)
+    (new_width / 2 * 2, new_height / 2 * 2)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -315,6 +849,35 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         .arg(preview_cmd)
         .status()
         .expect("Failed to generate previews");
+
+    // Extract standalone audio track from video (similar to audio file processing)
+    // Check if audio codec is lossless or high quality
+    let audio_codec = get_audio_codec(input_file);
+    let audio_bitrate = get_audio_bitrate(input_file);
+
+    // Use higher bitrate for lossless/high-quality sources or if source bitrate is high
+    let opus_bitrate = if audio_codec == "flac"
+        || audio_codec == "wav"
+        || audio_codec == "pcm_s16le"
+        || audio_codec == "truehd"
+        || audio_bitrate > 300000
+    {
+        "300k"
+    } else {
+        "256k"
+    };
+
+    let audio_output_path = format!("{}/audio.ogg", output_dir);
+    let extract_audio_cmd = format!(
+        "ffmpeg -i {} -vn -c:a libopus -b:a {} -vbr on -application audio {} -y",
+        input_file, opus_bitrate, audio_output_path
+    );
+    println!("Executing: {}", extract_audio_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(&extract_audio_cmd)
+        .status()
+        .expect("Failed to extract audio from video");
 
     Ok(())
 }
