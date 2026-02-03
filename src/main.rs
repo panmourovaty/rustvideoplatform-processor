@@ -312,7 +312,7 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
 
     // Full resolution AVIF
     let transcode_cmd = format!(
-        "ffmpeg -i {} -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif",
+        "ffmpeg -i {} -c:v libsvtav1 -crf 26 -b:v 0 {}/picture.avif",
         input_file, output_dir
     );
     println!("Executing: {}", transcode_cmd);
@@ -322,9 +322,9 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
         .status()
         .expect("Failed to transcode picture");
 
-    // HD thumbnail AVIF with proper aspect ratio using libsvtav1
+    // HD thumbnail AVIF with proper aspect ratio
     let thumbnail_cmd = format!(
-            "ffmpeg -i {} -c:v libsvtav1 -q:v 50 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' {}/thumbnail.avif",
+            "ffmpeg -i {} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif",
             input_file, thumb_width, thumb_height, output_dir
         );
     println!("Executing: {}", thumbnail_cmd);
@@ -394,23 +394,6 @@ fn get_audio_bitrate(input_file: &str) -> u32 {
     }
 }
 
-fn get_video_bitrate(input_file: &str) -> u32 {
-    let bitrate_cmd = format!(
-        "ffprobe -v error -select_streams v:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 {}",
-        input_file
-    );
-
-    let output = Command::new("sh").arg("-c").arg(&bitrate_cmd).output();
-
-    match output {
-        Ok(result) if result.status.success() => {
-            let bitrate_str = String::from_utf8_lossy(&result.stdout);
-            bitrate_str.trim().parse().unwrap_or(0)
-        }
-        _ => 0, // Return 0 if unknown - will use calculated default
-    }
-}
-
 fn has_video_stream(input_file: &str) -> bool {
     let probe_cmd = format!(
         "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
@@ -421,21 +404,6 @@ fn has_video_stream(input_file: &str) -> bool {
         Ok(result) if result.status.success() => {
             let output_str = String::from_utf8_lossy(&result.stdout);
             output_str.contains("video")
-        }
-        _ => false,
-    }
-}
-
-fn has_audio_stream(input_file: &str) -> bool {
-    let probe_cmd = format!(
-        "ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
-        input_file
-    );
-
-    match Command::new("sh").arg("-c").arg(&probe_cmd).output() {
-        Ok(result) if result.status.success() => {
-            let output_str = String::from_utf8_lossy(&result.stdout);
-            output_str.contains("audio")
         }
         _ => false,
     }
@@ -595,7 +563,7 @@ fn extract_secondary_video_as_cover(
 
     // Extract full resolution cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -q:v 26 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 26 -b:v 0 {}/picture.avif -y",
         input_file, stream_selector, output_dir
     );
     println!("Executing: {}", cover_cmd);
@@ -607,7 +575,7 @@ fn extract_secondary_video_as_cover(
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -q:v 50 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
         input_file, stream_selector, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -651,7 +619,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Extract full resolution album cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -q:v 26 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 26 -b:v 0 {}/picture.avif -y",
         input_file, output_dir
     );
     println!("Executing: {}", cover_cmd);
@@ -663,7 +631,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -q:v 50 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
         input_file, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -795,26 +763,15 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     }
     let duration = input_context.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64; // Video duration in seconds
 
-    // Check if video has audio stream
-    let has_audio = has_audio_stream(input_file);
-    if !has_audio {
-        println!("Video has no audio stream, processing without audio");
-    }
-
-    // Get original video bitrate to use as a cap
-    let original_bitrate = get_video_bitrate(input_file);
-    if original_bitrate > 0 {
-        println!("Original video bitrate: {} bps", original_bitrate);
-    }
-
-    let base_bitrate_per_pixel: u32 = 4; // 33 Mbps for 4k
-    let base_max_bitrate_per_pixel: u32 = 5; // 41 Mbps for 4k
+    let base_bitrate_per_pixel = 4; // 33 Mbps for 4k
+    let base_max_bitrate_per_pixel = 5; // 41 Mbps for 4k
     let mut audio_bitrate = 300; // 300 kbit
 
     let mut outputs = Vec::new();
-    // Calculate all resolutions from original to maintain exact aspect ratio
-    let quality_steps: u32;
-    if original_width * original_height >= 3686400 {
+    let mut width = original_width;
+    let mut height = original_height;
+    let quality_steps;
+    if (width * height) >= 3686400 {
         //2k video
         quality_steps = 4;
         audio_bitrate += 100;
@@ -831,46 +788,13 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
             _ => unreachable!(),
         };
 
-        // Calculate dimensions from original to maintain exact aspect ratio
-        // Use original aspect ratio to prevent DASH adaptation set conflicts
-        let scale_factor = 2_u32.pow(i);
-        let mut w = original_width / scale_factor;
-        let mut h = original_height / scale_factor;
-
-        // Ensure dimensions are even (required for many codecs)
-        w = w / 2 * 2;
-        h = h / 2 * 2;
-
-        // Ensure minimum dimensions
-        if w < 64 {
-            w = 64;
-        }
-        if h < 64 {
-            h = 64;
-        }
-
-        let calculated_bitrate = (w * h) * base_bitrate_per_pixel;
-        let calculated_max_bitrate = (w * h) * base_max_bitrate_per_pixel;
-
-        // Cap bitrate at original bitrate (with 10% headroom) to avoid inflating file size
-        let bitrate: u32 = if original_bitrate > 0 {
-            let max_allowed = ((original_bitrate as f64) * 1.1) as u32;
-            calculated_bitrate.min(max_allowed).max(50_000)
-        } else {
-            calculated_bitrate
-        };
-
-        let max_bitrate: u32 = if original_bitrate > 0 {
-            let max_allowed = ((original_bitrate as f64) * 1.2) as u32;
-            calculated_max_bitrate.min(max_allowed).max(100_000)
-        } else {
-            calculated_max_bitrate
-        };
+        let bitrate = (width * height) * base_bitrate_per_pixel;
+        let max_bitrate = (width * height) * base_max_bitrate_per_pixel;
         let min_bitrate = 10_000;
 
         outputs.push((
-            w,
-            h,
+            width,
+            height,
             label,
             bitrate,
             max_bitrate,
@@ -878,13 +802,14 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
             audio_bitrate,
         ));
 
+        width /= 2;
+        height /= 2;
         audio_bitrate /= 2;
     }
 
     let mut webm_files = Vec::new();
     let dash_output_dir = format!("{}/video", output_dir);
 
-    // Add bitrate metadata to WebM outputs to fix DASH "No bit rate set" warnings
     let mut cmd = format!(
         "ffmpeg -y -hwaccel vaapi -vaapi_device /dev/dri/renderD128 -i {} ",
         input_file
@@ -892,16 +817,8 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     for (w, h, label, bitrate, max_bitrate, min_bitrate, audio_bitrate) in outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        let audio_flags = if has_audio {
-            format!(" -c:a libopus -b:a {}k ", audio_bitrate)
-        } else {
-            " -an ".to_string()
-        };
-        let bitrate_value = bitrate.max(0) as u32;
-        // Add setsar=1:1 to ensure consistent aspect ratio across all resolutions
-        // This fixes "Conflicting stream aspect ratios" error in DASH
-        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,setsar=1:1,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {}{}-metadata:s:v:0 bps={} -f webm {} ",
-        w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_flags, bitrate_value, output_file).as_str());
+        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
+        w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_bitrate, output_file).as_str());
     }
 
     println!("Executing: {}", cmd);
@@ -924,21 +841,12 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
 
     let mut maps: String = String::new();
     for track_num in 0..quality_steps {
-        maps.push_str(format!(" -map {}:v ", track_num).as_str());
-        if has_audio {
-            maps.push_str(format!(" -map {}:a ", track_num).as_str());
-        }
+        maps.push_str(format!(" -map {}:v -map {}:a ", track_num, track_num).as_str())
     }
 
-    let adaptation_sets = if has_audio {
-        "'id=0,streams=v id=1,streams=a'"
-    } else {
-        "'id=0,streams=v'"
-    };
-
     let dash_output_cmd = format!(
-            "ffmpeg -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets {} -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
-            dash_input_cmds, maps, adaptation_sets, dash_output_dir
+            "ffmpeg -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
+            dash_input_cmds, maps, dash_output_dir
         );
 
     println!("Executing: {}", dash_output_cmd);
@@ -963,7 +871,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     }
 
     // generovat thumbnails
-    let random_time = rand::rng().random_range(0.0..duration);
+    let random_time = rand::thread_rng().gen_range(0.0..duration);
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
     let thumbnail_cmd = format!(
@@ -977,7 +885,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         .status()
         .expect("Failed to generate thumbnails");
 
-    // Generate thumbnail sprites
+    // Generate thumbnail sprites for vidstack.io (max 100 sprites per file)
     let preview_output_dir = format!("{}/previews", output_dir);
     fs::create_dir_all(&preview_output_dir).expect("Failed to create preview output directory");
 
@@ -1088,51 +996,34 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         num_sprite_files
     );
 
-    // Extract standalone audio track from video (only if audio exists)
-    if has_audio {
-        // Check if audio codec is lossless or high quality
-        let audio_codec = get_audio_codec(input_file);
-        let audio_bitrate = get_audio_bitrate(input_file);
+    // Extract standalone audio track from video (similar to audio file processing)
+    // Check if audio codec is lossless or high quality
+    let audio_codec = get_audio_codec(input_file);
+    let audio_bitrate = get_audio_bitrate(input_file);
 
-        // Use higher bitrate for lossless/high-quality sources or if source bitrate is high
-        let opus_bitrate = if audio_codec == "flac"
-            || audio_codec == "wav"
-            || audio_codec == "pcm_s16le"
-            || audio_codec == "truehd"
-            || audio_bitrate > 300000
-        {
-            "300k"
-        } else {
-            "256k"
-        };
-
-        let audio_output_path = format!("{}/audio.ogg", output_dir);
-        let extract_audio_cmd = format!(
-            "ffmpeg -i {} -vn -c:a libopus -b:a {} -vbr on -application audio {} -y",
-            input_file, opus_bitrate, audio_output_path
-        );
-        println!("Executing: {}", extract_audio_cmd);
-        match Command::new("sh")
-            .arg("-c")
-            .arg(&extract_audio_cmd)
-            .status()
-        {
-            Ok(status) if status.success() => {
-                println!("Audio extracted successfully");
-            }
-            Ok(status) => {
-                eprintln!(
-                    "Warning: Audio extraction failed with exit code: {:?}",
-                    status.code()
-                );
-            }
-            Err(e) => {
-                eprintln!("Warning: Failed to execute audio extraction: {}", e);
-            }
-        }
+    // Use higher bitrate for lossless/high-quality sources or if source bitrate is high
+    let opus_bitrate = if audio_codec == "flac"
+        || audio_codec == "wav"
+        || audio_codec == "pcm_s16le"
+        || audio_codec == "truehd"
+        || audio_bitrate > 300000
+    {
+        "300k"
     } else {
-        println!("Skipping audio extraction - no audio stream found");
-    }
+        "256k"
+    };
+
+    let audio_output_path = format!("{}/audio.ogg", output_dir);
+    let extract_audio_cmd = format!(
+        "ffmpeg -i {} -vn -c:a libopus -b:a {} -vbr on -application audio {} -y",
+        input_file, opus_bitrate, audio_output_path
+    );
+    println!("Executing: {}", extract_audio_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(&extract_audio_cmd)
+        .status()
+        .expect("Failed to extract audio from video");
 
     Ok(())
 }
