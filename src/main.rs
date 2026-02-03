@@ -842,8 +842,12 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         h = h / 2 * 2;
 
         // Ensure minimum dimensions
-        if w < 64 { w = 64; }
-        if h < 64 { h = 64; }
+        if w < 64 {
+            w = 64;
+        }
+        if h < 64 {
+            h = 64;
+        }
 
         let calculated_bitrate = (w * h) * base_bitrate_per_pixel;
         let calculated_max_bitrate = (w * h) * base_max_bitrate_per_pixel;
@@ -851,14 +855,16 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         // Cap bitrate at original bitrate (with 10% headroom) to avoid inflating file size
         let bitrate = if original_bitrate > 0 {
             let max_allowed = ((original_bitrate as f64) * 1.1) as i32;
-            calculated_bitrate.min(max_allowed).max(50_000) // Min 50k to ensure quality
+            calculated_bitrate.min(max_allowed as i32).max(50_000i32) // Min 50k to ensure quality
         } else {
             calculated_bitrate
         };
 
         let max_bitrate = if original_bitrate > 0 {
             let max_allowed = ((original_bitrate as f64) * 1.2) as i32;
-            calculated_max_bitrate.min(max_allowed).max(100_000) // Min 100k for maxrate
+            calculated_max_bitrate
+                .min(max_allowed as i32)
+                .max(100_000i32) // Min 100k for maxrate
         } else {
             calculated_max_bitrate
         };
@@ -957,7 +963,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     }
 
     // generovat thumbnails
-    let random_time = rand::thread_rng().gen_range(0.0..duration);
+    let random_time = rand::rng().random_range(0.0..duration);
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
     let thumbnail_cmd = format!(
