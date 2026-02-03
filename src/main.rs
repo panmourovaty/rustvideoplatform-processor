@@ -717,10 +717,22 @@ fn calculate_hd_scale(width: u32, height: u32) -> (u32, u32) {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ConceptPreview {
-    startTime: u128,
-    endTime: u128,
-    text: String,
+struct ThumbnailCue {
+    start_time: f64,
+    end_time: f64,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    sprite_idx: u32,
+}
+
+fn format_timestamp_vtt(seconds: f64) -> String {
+    let hours = (seconds / 3600.0) as u32;
+    let minutes = ((seconds % 3600.0) / 60.0) as u32;
+    let secs = (seconds % 60.0) as u32;
+    let millis = ((seconds % 1.0) * 1000.0) as u32;
+    format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, secs, millis)
 }
 
 fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
@@ -737,11 +749,11 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     let original_width = video_decoder.width();
     let original_height = video_decoder.height();
     let framerate: f32;
-    let (num, den) = video_stream.avg_frame_rate();
-    let fps = if den == 0 {
-        30.0 // fallback to 30fps if denominator is 0
+    let fr = video_stream.avg_frame_rate();
+    let fps = if fr.denominator() == 0 {
+        30.0 // fallback to 30fps
     } else {
-        num as f32 / den as f32
+        fr.numerator() as f32 / fr.denominator() as f32
     };
 
     if fps > 120.0 {
@@ -873,71 +885,116 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         .status()
         .expect("Failed to generate thumbnails");
 
-    // generovat previews - every 20 seconds
+    // Generate thumbnail sprites for vidstack.io (max 100 sprites per file)
     let preview_output_dir = format!("{}/previews", output_dir);
     fs::create_dir_all(&preview_output_dir).expect("Failed to create preview output directory");
 
-    let mut preview_list: Vec<ConceptPreview> = Vec::new();
-    let interval_seconds = 20u64;
-    let mut preview_time: u64 = 0;
+    let interval_seconds = 10.0; // 10 second intervals for smoother seeking
+    let thumb_width = 160;
+    let thumb_height = 90;
+    let max_sprites_per_file = 100;
+    let sprites_across = 10; // 10 thumbnails per row in the sprite
 
-    // Generate previews every 20 seconds using individual ffmpeg commands for reliability
-    loop {
-        let preview_id = (preview_time / interval_seconds) + 1;
-        let preview_filename = format!("preview{}.avif", preview_id);
-        let output_path = format!("{}/{}", preview_output_dir, preview_filename);
+    // Calculate number of thumbnails needed
+    let num_thumbnails = (duration / interval_seconds).ceil() as u32;
+    let num_sprite_files = ((num_thumbnails as f32) / (max_sprites_per_file as f32)).ceil() as u32;
 
-        // Generate single thumbnail at specific timestamp
-        let preview_cmd = format!(
-            "ffmpeg -y -ss {} -i {} -vf 'scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2' -frames:v 1 -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 {}",
-            preview_time, input_file, output_path
+    println!(
+        "Generating {} thumbnail sprites with {} total thumbnails (max {} per file)...",
+        num_sprite_files, num_thumbnails, max_sprites_per_file
+    );
+
+    // Generate each sprite file
+    for sprite_idx in 0..num_sprite_files {
+        let start_thumb_idx = sprite_idx * max_sprites_per_file;
+        let end_thumb_idx = ((start_thumb_idx + max_sprites_per_file).min(num_thumbnails)) as u32;
+        let thumbs_in_this_file = end_thumb_idx - start_thumb_idx;
+        let rows_in_this_file =
+            ((thumbs_in_this_file as f32) / (sprites_across as f32)).ceil() as u32;
+
+        let start_time = (start_thumb_idx as f64) * interval_seconds;
+
+        let sprite_path = format!("{}/preview_sprite_{}.avif", preview_output_dir, sprite_idx);
+        let tile_filter = format!(
+            "select='gte(t,{})*lt(t,{})',scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,tile={}x{}",
+            start_time,
+            (end_thumb_idx as f64) * interval_seconds,
+            thumb_width, thumb_height, thumb_width, thumb_height,
+            sprites_across, rows_in_this_file
         );
 
-        println!(
-            "Generating preview {} at {}s: {}",
-            preview_id, preview_time, preview_cmd
+        let sprite_cmd = format!(
+            "ffmpeg -y -ss {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 -frames:v 1 {}",
+            start_time, input_file, tile_filter, sprite_path
         );
-        let status = Command::new("sh").arg("-c").arg(&preview_cmd).status();
 
-        match status {
-            Ok(exit_status) if exit_status.success() => {
-                let new_preview = ConceptPreview {
-                    startTime: preview_time as u128,
-                    endTime: (preview_time + interval_seconds) as u128,
-                    text: format!("previews/{}", preview_filename),
-                };
-                preview_list.push(new_preview);
+        println!("Executing sprite {}: {}", sprite_idx, sprite_cmd);
+        let sprite_status = Command::new("sh").arg("-c").arg(&sprite_cmd).status();
+
+        match sprite_status {
+            Ok(status) if status.success() => {
+                println!("Sprite {} generated successfully", sprite_idx);
             }
-            Ok(exit_status) => {
+            Ok(status) => {
                 eprintln!(
-                    "Warning: Failed to generate preview at {}s, exit code: {:?}",
-                    preview_time,
-                    exit_status.code()
+                    "Warning: Sprite {} generation failed with exit code: {:?}",
+                    sprite_idx,
+                    status.code()
                 );
             }
             Err(e) => {
                 eprintln!(
-                    "Warning: Failed to execute preview command at {}s: {}",
-                    preview_time, e
+                    "Warning: Failed to execute sprite {} command: {}",
+                    sprite_idx, e
                 );
             }
         }
-
-        preview_time += interval_seconds;
-
-        if preview_time >= duration as u64 {
-            break;
-        }
     }
 
-    // Write the updated previews.json with proper format for vidstack.io
-    fs::write(
-        format!("{}/previews.json", output_dir),
-        serde_json::to_string_pretty(&preview_list).unwrap(),
-    )
-    .expect("Unable to write previews.json file");
+    // Generate WebVTT file with sprite coordinates
+    let mut vtt_cues: Vec<ThumbnailCue> = Vec::new();
 
-    println!("Generated {} previews", preview_list.len());
+    for i in 0..num_thumbnails {
+        let sprite_file_idx = i / max_sprites_per_file;
+        let local_idx = i % max_sprites_per_file;
+        let row = local_idx / sprites_across;
+        let col = local_idx % sprites_across;
+        let x = col * thumb_width;
+        let y = row * thumb_height;
+        let start_time = (i as f64) * interval_seconds;
+        let end_time = ((i + 1) as f64) * interval_seconds;
+
+        vtt_cues.push(ThumbnailCue {
+            start_time,
+            end_time: end_time.min(duration),
+            x,
+            y,
+            width: thumb_width,
+            height: thumb_height,
+            sprite_idx: sprite_file_idx,
+        });
+    }
+
+    // Write WebVTT file
+    let vtt_path = format!("{}/previews.vtt", preview_output_dir);
+    let mut vtt_content = String::from("WEBVTT\n\n");
+
+    for cue in &vtt_cues {
+        let start_formatted = format_timestamp_vtt(cue.start_time);
+        let end_formatted = format_timestamp_vtt(cue.end_time);
+        let sprite_filename = format!("preview_sprite_{}.avif", cue.sprite_idx);
+        vtt_content.push_str(&format!(
+            "{} --> {}\n{}#xywh={},{},{},{}\n\n",
+            start_formatted, end_formatted, sprite_filename, cue.x, cue.y, cue.width, cue.height
+        ));
+    }
+
+    fs::write(&vtt_path, vtt_content).expect("Failed to write thumbnails.vtt file");
+    println!(
+        "Generated WebVTT thumbnails file with {} cues across {} sprite files",
+        vtt_cues.len(),
+        num_sprite_files
+    );
 
     // Extract standalone audio track from video (similar to audio file processing)
     // Check if audio codec is lossless or high quality
