@@ -915,17 +915,17 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         let start_time = (start_thumb_idx as f64) * interval_seconds;
 
         let sprite_path = format!("{}/preview_sprite_{}.avif", preview_output_dir, sprite_idx);
+        let duration_for_this_file = thumbs_in_this_file as f64 * interval_seconds;
+
         let tile_filter = format!(
-            "select='gte(t,{})*lt(t,{})',scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,tile={}x{}",
-            start_time,
-            (end_thumb_idx as f64) * interval_seconds,
-            thumb_width, thumb_height, thumb_width, thumb_height,
+            "fps=1/{:.3},scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,tile={}x{}",
+            interval_seconds, thumb_width, thumb_height, thumb_width, thumb_height,
             sprites_across, rows_in_this_file
         );
 
         let sprite_cmd = format!(
-            "ffmpeg -y -ss {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 -frames:v 1 {}",
-            start_time, input_file, tile_filter, sprite_path
+            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 {}",
+            start_time, duration_for_this_file, input_file, tile_filter, sprite_path
         );
 
         println!("Executing sprite {}: {}", sprite_idx, sprite_cmd);
