@@ -312,7 +312,7 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
 
     // Full resolution AVIF
     let transcode_cmd = format!(
-        "ffmpeg -i {} -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif",
+        "ffmpeg -i {} -c:v libsvtav1 -crf 26 -b:v 0 {}/picture.avif",
         input_file, output_dir
     );
     println!("Executing: {}", transcode_cmd);
@@ -324,7 +324,7 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
 
     // HD thumbnail AVIF with proper aspect ratio
     let thumbnail_cmd = format!(
-            "ffmpeg -i {} -c:v libaom-av1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif",
+            "ffmpeg -i {} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif",
             input_file, thumb_width, thumb_height, output_dir
         );
     println!("Executing: {}", thumbnail_cmd);
@@ -563,7 +563,7 @@ fn extract_secondary_video_as_cover(
 
     // Extract full resolution cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 26 -b:v 0 {}/picture.avif -y",
         input_file, stream_selector, output_dir
     );
     println!("Executing: {}", cover_cmd);
@@ -575,7 +575,7 @@ fn extract_secondary_video_as_cover(
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libaom-av1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
         input_file, stream_selector, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -619,7 +619,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Extract full resolution album cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 26 -b:v 0 {}/picture.avif -y",
         input_file, output_dir
     );
     println!("Executing: {}", cover_cmd);
@@ -631,7 +631,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libaom-av1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
         input_file, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
