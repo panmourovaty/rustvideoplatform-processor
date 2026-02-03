@@ -1011,11 +1011,11 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     let preview_output_dir = format!("{}/previews", output_dir);
     fs::create_dir_all(&preview_output_dir).expect("Failed to create preview output directory");
 
-    let interval_seconds = 10.0; // 10 second intervals for smoother seeking
+    let interval_seconds = 5.0; // 5 second interval for screenshot
     let thumb_width = 160;
     let thumb_height = 90;
-    let max_sprites_per_file = 100;
-    let sprites_across = 10; // 10 thumbnails per row in the sprite
+    let max_sprites_per_file = 200;
+    let sprites_across = 20; // thumbnails per row
 
     // Calculate number of thumbnails needed
     let num_thumbnails = (duration / interval_seconds).ceil() as u32;
@@ -1046,7 +1046,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         );
 
         let sprite_cmd = format!(
-            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 -r 1 -frames:v 1 -f image2 {}",
+            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 60 -r 1 -frames:v 1 -f image2 {}",
             start_time, duration_for_this_file, input_file, tile_filter, sprite_path
         );
 
