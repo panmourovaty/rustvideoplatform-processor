@@ -807,8 +807,8 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         println!("Original video bitrate: {} bps", original_bitrate);
     }
 
-    let base_bitrate_per_pixel = 4; // 33 Mbps for 4k
-    let base_max_bitrate_per_pixel = 5; // 41 Mbps for 4k
+    let base_bitrate_per_pixel: u32 = 4; // 33 Mbps for 4k
+    let base_max_bitrate_per_pixel: u32 = 5; // 41 Mbps for 4k
     let mut audio_bitrate = 300; // 300 kbit
 
     let mut outputs = Vec::new();
@@ -853,18 +853,16 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         let calculated_max_bitrate = (w * h) * base_max_bitrate_per_pixel;
 
         // Cap bitrate at original bitrate (with 10% headroom) to avoid inflating file size
-        let bitrate = if original_bitrate > 0 {
-            let max_allowed = ((original_bitrate as f64) * 1.1) as i32;
-            calculated_bitrate.min(max_allowed as i32).max(50_000i32) // Min 50k to ensure quality
+        let bitrate: u32 = if original_bitrate > 0 {
+            let max_allowed = ((original_bitrate as f64) * 1.1) as u32;
+            calculated_bitrate.min(max_allowed).max(50_000)
         } else {
             calculated_bitrate
         };
 
-        let max_bitrate = if original_bitrate > 0 {
-            let max_allowed = ((original_bitrate as f64) * 1.2) as i32;
-            calculated_max_bitrate
-                .min(max_allowed as i32)
-                .max(100_000i32) // Min 100k for maxrate
+        let max_bitrate: u32 = if original_bitrate > 0 {
+            let max_allowed = ((original_bitrate as f64) * 1.2) as u32;
+            calculated_max_bitrate.min(max_allowed).max(100_000)
         } else {
             calculated_max_bitrate
         };
