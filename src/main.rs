@@ -394,6 +394,23 @@ fn get_audio_bitrate(input_file: &str) -> u32 {
     }
 }
 
+fn get_video_bitrate(input_file: &str) -> u32 {
+    let bitrate_cmd = format!(
+        "ffprobe -v error -select_streams v:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    let output = Command::new("sh").arg("-c").arg(&bitrate_cmd).output();
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let bitrate_str = String::from_utf8_lossy(&result.stdout);
+            bitrate_str.trim().parse().unwrap_or(0)
+        }
+        _ => 0, // Return 0 if unknown - will use calculated default
+    }
+}
+
 fn has_video_stream(input_file: &str) -> bool {
     let probe_cmd = format!(
         "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
@@ -784,15 +801,20 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         println!("Video has no audio stream, processing without audio");
     }
 
+    // Get original video bitrate to use as a cap
+    let original_bitrate = get_video_bitrate(input_file);
+    if original_bitrate > 0 {
+        println!("Original video bitrate: {} bps", original_bitrate);
+    }
+
     let base_bitrate_per_pixel = 4; // 33 Mbps for 4k
     let base_max_bitrate_per_pixel = 5; // 41 Mbps for 4k
     let mut audio_bitrate = 300; // 300 kbit
 
     let mut outputs = Vec::new();
-    let mut width = original_width;
-    let mut height = original_height;
-    let quality_steps;
-    if (width * height) >= 3686400 {
+    // Calculate all resolutions from original to maintain exact aspect ratio
+    let quality_steps: u32;
+    if original_width * original_height >= 3686400 {
         //2k video
         quality_steps = 4;
         audio_bitrate += 100;
@@ -809,13 +831,42 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
             _ => unreachable!(),
         };
 
-        let bitrate = (width * height) * base_bitrate_per_pixel;
-        let max_bitrate = (width * height) * base_max_bitrate_per_pixel;
+        // Calculate dimensions from original to maintain exact aspect ratio
+        // Use original aspect ratio to prevent DASH adaptation set conflicts
+        let scale_factor = 2_u32.pow(i);
+        let mut w = original_width / scale_factor;
+        let mut h = original_height / scale_factor;
+
+        // Ensure dimensions are even (required for many codecs)
+        w = w / 2 * 2;
+        h = h / 2 * 2;
+
+        // Ensure minimum dimensions
+        if w < 64 { w = 64; }
+        if h < 64 { h = 64; }
+
+        let calculated_bitrate = (w * h) * base_bitrate_per_pixel;
+        let calculated_max_bitrate = (w * h) * base_max_bitrate_per_pixel;
+
+        // Cap bitrate at original bitrate (with 10% headroom) to avoid inflating file size
+        let bitrate = if original_bitrate > 0 {
+            let max_allowed = ((original_bitrate as f64) * 1.1) as i32;
+            calculated_bitrate.min(max_allowed).max(50_000) // Min 50k to ensure quality
+        } else {
+            calculated_bitrate
+        };
+
+        let max_bitrate = if original_bitrate > 0 {
+            let max_allowed = ((original_bitrate as f64) * 1.2) as i32;
+            calculated_max_bitrate.min(max_allowed).max(100_000) // Min 100k for maxrate
+        } else {
+            calculated_max_bitrate
+        };
         let min_bitrate = 10_000;
 
         outputs.push((
-            width,
-            height,
+            w,
+            h,
             label,
             bitrate,
             max_bitrate,
@@ -823,14 +874,13 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
             audio_bitrate,
         ));
 
-        width /= 2;
-        height /= 2;
         audio_bitrate /= 2;
     }
 
     let mut webm_files = Vec::new();
     let dash_output_dir = format!("{}/video", output_dir);
 
+    // Add bitrate metadata to WebM outputs to fix DASH "No bit rate set" warnings
     let mut cmd = format!(
         "ffmpeg -y -hwaccel vaapi -vaapi_device /dev/dri/renderD128 -i {} ",
         input_file
@@ -843,8 +893,9 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         } else {
             " -an ".to_string()
         };
-        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {}{}-f webm {} ",
-        w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_flags, output_file).as_str());
+        let bitrate_value = bitrate.max(0) as u32;
+        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {}{}-metadata:s:v:0 bps={} -f webm {} ",
+        w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_flags, bitrate_value, output_file).as_str());
     }
 
     println!("Executing: {}", cmd);
