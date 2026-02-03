@@ -192,9 +192,96 @@ fn detect_file_type(input_file: &str) -> Option<String> {
         }
     }
 
-    // Only video stream (no audio)
+    // Only video stream (no audio) - determine if it's a static image or silent video
     if has_video {
-        return Some("picture".to_string());
+        // Check frame count to distinguish between picture (1 frame) and video (>1 frame)
+        let nb_frames_cmd = format!(
+            "ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 {}",
+            input_file
+        );
+
+        let nb_frames_output = Command::new("sh").arg("-c").arg(&nb_frames_cmd).output();
+
+        match nb_frames_output {
+            Ok(result) if result.status.success() => {
+                let frames_str = String::from_utf8_lossy(&result.stdout);
+                let frames_str = frames_str.trim();
+                if !frames_str.is_empty() && frames_str != "N/A" {
+                    if let Ok(frame_count) = frames_str.parse::<i64>() {
+                        if frame_count > 1 {
+                            return Some("video".to_string());
+                        } else {
+                            return Some("picture".to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Calculate frame count from duration * fps
+        let stream_info_cmd = format!(
+            "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,avg_frame_rate -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            input_file
+        );
+
+        let info_output = Command::new("sh").arg("-c").arg(&stream_info_cmd).output();
+
+        match info_output {
+            Ok(result) if result.status.success() => {
+                let info_str = String::from_utf8_lossy(&result.stdout);
+                let lines: Vec<&str> = info_str.lines().collect();
+
+                if lines.len() >= 3 {
+                    let duration: f64 = lines[0].trim().parse().unwrap_or(0.0);
+                    let fps_str = lines[1].trim();
+                    let fps = if fps_str.contains('/') {
+                        let parts: Vec<&str> = fps_str.split('/').collect();
+                        if parts.len() == 2 {
+                            let num: f64 = parts[0].parse().unwrap_or(0.0);
+                            let den: f64 = parts[1].parse().unwrap_or(1.0);
+                            if den > 0.0 { num / den } else { 0.0 }
+                        } else {
+                            fps_str.parse().unwrap_or(0.0)
+                        }
+                    } else {
+                        fps_str.parse().unwrap_or(0.0)
+                    };
+
+                    if duration > 0.0 && fps > 0.0 {
+                        let estimated_frames = (duration * fps) as i64;
+                        if estimated_frames > 1 {
+                            return Some("video".to_string());
+                        } else {
+                            return Some("picture".to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Use duration as fallback - short duration likely a picture
+        let duration_cmd = format!(
+            "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            input_file
+        );
+
+        let dur_result = Command::new("sh").arg("-c").arg(&duration_cmd).output();
+
+        match dur_result {
+            Ok(dur_res) if dur_res.status.success() => {
+                let dur_str = String::from_utf8_lossy(&dur_res.stdout);
+                let duration: f64 = dur_str.trim().parse().unwrap_or(0.0);
+                // If duration is effectively 0 or very short, it's a picture
+                if duration <= 0.1 {
+                    return Some("picture".to_string());
+                } else {
+                    return Some("video".to_string());
+                }
+            }
+            _ => return Some("picture".to_string()),
+        }
     }
 
     return None;
@@ -312,7 +399,7 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
 
     // Full resolution AVIF
     let transcode_cmd = format!(
-        "ffmpeg -i {} -c:v libsvtav1 -crf 26 -b:v 0 -frames:v 1 {}/picture.avif",
+        "ffmpeg -i {} -c:v libsvtav1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif",
         input_file, output_dir
     );
     println!("Executing: {}", transcode_cmd);
@@ -324,7 +411,7 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
 
     // HD thumbnail AVIF with proper aspect ratio
     let thumbnail_cmd = format!(
-            "ffmpeg -i {} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 -frames:v 1 {}/thumbnail.avif",
+            "ffmpeg -i {} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif",
             input_file, thumb_width, thumb_height, output_dir
         );
     println!("Executing: {}", thumbnail_cmd);
@@ -563,7 +650,7 @@ fn extract_secondary_video_as_cover(
 
     // Extract full resolution cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 26 -b:v 0 -frames:v 1 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif -y",
         input_file, stream_selector, output_dir
     );
     println!("Executing: {}", cover_cmd);
@@ -575,7 +662,7 @@ fn extract_secondary_video_as_cover(
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 -frames:v 1 {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif -y",
         input_file, stream_selector, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -619,7 +706,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Extract full resolution album cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 26 -b:v 0 -frames:v 1 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif -y",
         input_file, output_dir
     );
     println!("Executing: {}", cover_cmd);
@@ -631,7 +718,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 -frames:v 1 {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif -y",
         input_file, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -767,6 +854,9 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     let base_max_bitrate_per_pixel = 5; // 41 Mbps for 4k
     let mut audio_bitrate = 300; // 300 kbit
 
+    // Calculate aspect ratio once to ensure all resolutions maintain it
+    let aspect_ratio = original_width as f32 / original_height as f32;
+
     let mut outputs = Vec::new();
     let mut width = original_width;
     let mut height = original_height;
@@ -802,8 +892,12 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
             audio_bitrate,
         ));
 
-        width /= 2;
-        height /= 2;
+        // Halve dimensions while maintaining aspect ratio (make dimensions even)
+        width = ((width as f32 / 2.0 / aspect_ratio).round() * aspect_ratio).round() as i32;
+        height = (width as f32 / aspect_ratio).round() as i32;
+        // Ensure dimensions are even (required for many codecs)
+        width = (width / 2) * 2;
+        height = (height / 2) * 2;
         audio_bitrate /= 2;
     }
 
@@ -817,7 +911,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     for (w, h, label, bitrate, max_bitrate, min_bitrate, audio_bitrate) in outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
+        cmd.push_str(format!(" -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
         w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_bitrate, output_file).as_str());
     }
 
@@ -875,7 +969,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
     let thumbnail_cmd = format!(
-        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 -c:v libsvtav1 -pix_fmt yuv420p {}/thumbnail.avif",
+        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 -c:v libsvtav1 -pix_fmt yuv420p -f image2 {}/thumbnail.avif",
         random_time, input_file, output_dir, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -924,7 +1018,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         );
 
         let sprite_cmd = format!(
-            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 -r 1 {}",
+            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 -r 1 -frames:v 1 -f image2 {}",
             start_time, duration_for_this_file, input_file, tile_filter, sprite_path
         );
 
