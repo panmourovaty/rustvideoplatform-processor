@@ -403,7 +403,7 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
 
     // Full resolution AVIF
     let transcode_cmd = format!(
-        "ffmpeg -i {} -c:v libsvtav1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif",
+        "ffmpeg -i {} -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif",
         input_file, output_dir
     );
     println!("Executing: {}", transcode_cmd);
@@ -415,7 +415,7 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
 
     // HD thumbnail AVIF with proper aspect ratio
     let thumbnail_cmd = format!(
-            "ffmpeg -i {} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif",
+            "ffmpeg -i {} -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif",
             input_file, thumb_width, thumb_height, output_dir
         );
     println!("Executing: {}", thumbnail_cmd);
@@ -654,7 +654,7 @@ fn extract_secondary_video_as_cover(
 
     // Extract full resolution cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif -y",
         input_file, stream_selector, output_dir
     );
     println!("Executing: {}", cover_cmd);
@@ -666,7 +666,7 @@ fn extract_secondary_video_as_cover(
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif -y",
         input_file, stream_selector, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -710,7 +710,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Extract full resolution album cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif -y",
         input_file, output_dir
     );
     println!("Executing: {}", cover_cmd);
@@ -722,7 +722,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif -y",
         input_file, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -855,7 +855,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     let duration = input_context.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64; // Video duration in seconds
 
     let base_bitrate_per_pixel = 3; // 4 -33 Mbps for 4k
-    let base_max_bitrate_per_pixel = 4; // 5 - 41 Mbps for 4k
+    let base_max_bitrate_per_pixel = 4; // 5- 41 Mbps for 4k
     let mut audio_bitrate = 256; // 300 kbit
 
     // Calculate aspect ratio once to ensure all resolutions maintain it
@@ -915,7 +915,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     for (w, h, label, bitrate, max_bitrate, min_bitrate, audio_bitrate) in outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        cmd.push_str(format!(" -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
+        cmd.push_str(format!(" -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={},format=p010le,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
         w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_bitrate, output_file).as_str());
     }
 
@@ -973,7 +973,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
     let thumbnail_cmd = format!(
-        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 -c:v libsvtav1 -pix_fmt yuv420p -f image2 {}/thumbnail.avif",
+        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -f image2 {}/thumbnail.avif",
         random_time, input_file, output_dir, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -986,7 +986,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     // Generate animated showcase.avif (60 frames from beginning for slow live preview)
     println!("Generating showcase.avif (60 frame animated preview)...");
     let showcase_cmd = format!(
-        "ffmpeg -y -i {} -vf 'scale=480:-1:force_original_aspect_ratio=decrease,fps=2,format=yuv420p' -frames:v 60 -c:v libsvtav1 -pix_fmt yuv420p -q:v 40 {}/showcase.avif",
+        "ffmpeg -y -i {} -vf 'scale=480:-1:force_original_aspect_ratio=decrease,fps=2,format=yuv420p10le' -frames:v 60 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 40 {}/showcase.avif",
         input_file, output_dir
     );
     println!("Executing: {}", showcase_cmd);
@@ -1011,11 +1011,11 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     let preview_output_dir = format!("{}/previews", output_dir);
     fs::create_dir_all(&preview_output_dir).expect("Failed to create preview output directory");
 
-    let interval_seconds = 5.0; // 5 second interval for screenshot
+    let interval_seconds = 10.0; // 10 second intervals for smoother seeking
     let thumb_width = 160;
     let thumb_height = 90;
-    let max_sprites_per_file = 200;
-    let sprites_across = 20; // thumbnails per row
+    let max_sprites_per_file = 100;
+    let sprites_across = 10; // 10 thumbnails per row in the sprite
 
     // Calculate number of thumbnails needed
     let num_thumbnails = (duration / interval_seconds).ceil() as u32;
@@ -1046,7 +1046,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         );
 
         let sprite_cmd = format!(
-            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 60 -r 1 -frames:v 1 -f image2 {}",
+            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 60 -r 1 -frames:v 1 -f image2 {}",
             start_time, duration_for_this_file, input_file, tile_filter, sprite_path
         );
 
