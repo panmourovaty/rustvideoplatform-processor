@@ -813,42 +813,71 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         .status()
         .expect("Failed to generate thumbnails");
 
-    // generovat previews
+    // generovat previews - every 20 seconds
     let preview_output_dir = format!("{}/previews", output_dir);
     fs::create_dir_all(&preview_output_dir).expect("Failed to create preview output directory");
-    let mut preview_list: Vec<ConceptPreview> = Vec::new();
-    let mut preview_time: u128 = 0;
-    let mut preview_id: u128 = 1;
-    loop {
-        let new_preview: ConceptPreview = ConceptPreview {
-            startTime: preview_time,
-            endTime: preview_time + 10,
-            text: format!("previews/preview{}.avif", preview_id),
-        };
-        preview_list.push(new_preview);
-        preview_time += 10;
-        preview_id += 1;
 
-        if preview_time > duration as u128 {
+    let mut preview_list: Vec<ConceptPreview> = Vec::new();
+    let interval_seconds = 20u64;
+    let mut preview_time: u64 = 0;
+
+    // Generate previews every 20 seconds using individual ffmpeg commands for reliability
+    loop {
+        let preview_id = (preview_time / interval_seconds) + 1;
+        let preview_filename = format!("preview{}.avif", preview_id);
+        let output_path = format!("{}/{}", preview_output_dir, preview_filename);
+
+        // Generate single thumbnail at specific timestamp
+        let preview_cmd = format!(
+            "ffmpeg -y -ss {} -i {} -vf 'scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2' -frames:v 1 -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 {}",
+            preview_time, input_file, output_path
+        );
+
+        println!(
+            "Generating preview {} at {}s: {}",
+            preview_id, preview_time, preview_cmd
+        );
+        let status = Command::new("sh").arg("-c").arg(&preview_cmd).status();
+
+        match status {
+            Ok(exit_status) if exit_status.success() => {
+                let new_preview = ConceptPreview {
+                    startTime: preview_time as u128,
+                    endTime: (preview_time + interval_seconds) as u128,
+                    text: format!("previews/{}", preview_filename),
+                };
+                preview_list.push(new_preview);
+            }
+            Ok(exit_status) => {
+                eprintln!(
+                    "Warning: Failed to generate preview at {}s, exit code: {:?}",
+                    preview_time,
+                    exit_status.code()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to execute preview command at {}s: {}",
+                    preview_time, e
+                );
+            }
+        }
+
+        preview_time += interval_seconds;
+
+        if preview_time >= duration as u64 {
             break;
         }
     }
-    fs::write(
-        format!("{}/previews.json", preview_output_dir),
-        serde_json::to_string(&preview_list).unwrap(),
-    )
-    .expect("Unable to write file");
 
-    let preview_cmd = format!(
-        "ffmpeg -i {} -c:v libsvtav1 -pix_fmt yuv420p -vf \"fps=1/10,scale=320:180\" -vsync vfr -q:v 10 -f image2 \"{}/preview%d.avif\"",
-        input_file, preview_output_dir
-    );
-    println!("Executing: {}", preview_cmd);
-    Command::new("sh")
-        .arg("-c")
-        .arg(preview_cmd)
-        .status()
-        .expect("Failed to generate previews");
+    // Write the updated previews.json with proper format for vidstack.io
+    fs::write(
+        format!("{}/previews.json", output_dir),
+        serde_json::to_string_pretty(&preview_list).unwrap(),
+    )
+    .expect("Unable to write previews.json file");
+
+    println!("Generated {} previews", preview_list.len());
 
     // Extract standalone audio track from video (similar to audio file processing)
     // Check if audio codec is lossless or high quality
