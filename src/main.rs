@@ -924,7 +924,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         );
 
         let sprite_cmd = format!(
-            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 {}",
+            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 -r 1 {}",
             start_time, duration_for_this_file, input_file, tile_filter, sprite_path
         );
 
