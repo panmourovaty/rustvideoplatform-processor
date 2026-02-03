@@ -409,6 +409,21 @@ fn has_video_stream(input_file: &str) -> bool {
     }
 }
 
+fn has_audio_stream(input_file: &str) -> bool {
+    let probe_cmd = format!(
+        "ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    match Command::new("sh").arg("-c").arg(&probe_cmd).output() {
+        Ok(result) if result.status.success() => {
+            let output_str = String::from_utf8_lossy(&result.stdout);
+            output_str.contains("audio")
+        }
+        _ => false,
+    }
+}
+
 fn is_cover_art_video(input_file: &str) -> bool {
     // Check if video stream duration is very short compared to audio
     // This typically indicates cover art/album art in a music file
@@ -763,6 +778,12 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     }
     let duration = input_context.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64; // Video duration in seconds
 
+    // Check if video has audio stream
+    let has_audio = has_audio_stream(input_file);
+    if !has_audio {
+        println!("Video has no audio stream, processing without audio");
+    }
+
     let base_bitrate_per_pixel = 4; // 33 Mbps for 4k
     let base_max_bitrate_per_pixel = 5; // 41 Mbps for 4k
     let mut audio_bitrate = 300; // 300 kbit
@@ -817,8 +838,13 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     for (w, h, label, bitrate, max_bitrate, min_bitrate, audio_bitrate) in outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
-        w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_bitrate, output_file).as_str());
+        let audio_flags = if has_audio {
+            format!(" -c:a libopus -b:a {}k ", audio_bitrate)
+        } else {
+            " -an ".to_string()
+        };
+        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {}{}-f webm {} ",
+        w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_flags, output_file).as_str());
     }
 
     println!("Executing: {}", cmd);
@@ -841,12 +867,21 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
 
     let mut maps: String = String::new();
     for track_num in 0..quality_steps {
-        maps.push_str(format!(" -map {}:v -map {}:a ", track_num, track_num).as_str())
+        maps.push_str(format!(" -map {}:v ", track_num).as_str());
+        if has_audio {
+            maps.push_str(format!(" -map {}:a ", track_num).as_str());
+        }
     }
 
+    let adaptation_sets = if has_audio {
+        "'id=0,streams=v id=1,streams=a'"
+    } else {
+        "'id=0,streams=v'"
+    };
+
     let dash_output_cmd = format!(
-            "ffmpeg -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
-            dash_input_cmds, maps, dash_output_dir
+            "ffmpeg -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets {} -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
+            dash_input_cmds, maps, adaptation_sets, dash_output_dir
         );
 
     println!("Executing: {}", dash_output_cmd);
@@ -996,34 +1031,51 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         num_sprite_files
     );
 
-    // Extract standalone audio track from video (similar to audio file processing)
-    // Check if audio codec is lossless or high quality
-    let audio_codec = get_audio_codec(input_file);
-    let audio_bitrate = get_audio_bitrate(input_file);
+    // Extract standalone audio track from video (only if audio exists)
+    if has_audio {
+        // Check if audio codec is lossless or high quality
+        let audio_codec = get_audio_codec(input_file);
+        let audio_bitrate = get_audio_bitrate(input_file);
 
-    // Use higher bitrate for lossless/high-quality sources or if source bitrate is high
-    let opus_bitrate = if audio_codec == "flac"
-        || audio_codec == "wav"
-        || audio_codec == "pcm_s16le"
-        || audio_codec == "truehd"
-        || audio_bitrate > 300000
-    {
-        "300k"
+        // Use higher bitrate for lossless/high-quality sources or if source bitrate is high
+        let opus_bitrate = if audio_codec == "flac"
+            || audio_codec == "wav"
+            || audio_codec == "pcm_s16le"
+            || audio_codec == "truehd"
+            || audio_bitrate > 300000
+        {
+            "300k"
+        } else {
+            "256k"
+        };
+
+        let audio_output_path = format!("{}/audio.ogg", output_dir);
+        let extract_audio_cmd = format!(
+            "ffmpeg -i {} -vn -c:a libopus -b:a {} -vbr on -application audio {} -y",
+            input_file, opus_bitrate, audio_output_path
+        );
+        println!("Executing: {}", extract_audio_cmd);
+        match Command::new("sh")
+            .arg("-c")
+            .arg(&extract_audio_cmd)
+            .status()
+        {
+            Ok(status) if status.success() => {
+                println!("Audio extracted successfully");
+            }
+            Ok(status) => {
+                eprintln!(
+                    "Warning: Audio extraction failed with exit code: {:?}",
+                    status.code()
+                );
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to execute audio extraction: {}", e);
+            }
+        }
     } else {
-        "256k"
-    };
-
-    let audio_output_path = format!("{}/audio.ogg", output_dir);
-    let extract_audio_cmd = format!(
-        "ffmpeg -i {} -vn -c:a libopus -b:a {} -vbr on -application audio {} -y",
-        input_file, opus_bitrate, audio_output_path
-    );
-    println!("Executing: {}", extract_audio_cmd);
-    Command::new("sh")
-        .arg("-c")
-        .arg(&extract_audio_cmd)
-        .status()
-        .expect("Failed to extract audio from video");
+        println!("Skipping audio extraction - no audio stream found");
+    }
 
     Ok(())
 }
