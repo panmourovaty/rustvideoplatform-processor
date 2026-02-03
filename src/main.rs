@@ -322,9 +322,9 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
         .status()
         .expect("Failed to transcode picture");
 
-    // HD thumbnail AVIF with proper aspect ratio
+    // HD thumbnail AVIF with proper aspect ratio using libsvtav1
     let thumbnail_cmd = format!(
-            "ffmpeg -i {} -c:v libaom-av1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif",
+            "ffmpeg -i {} -c:v libsvtav1 -q:v 50 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' {}/thumbnail.avif",
             input_file, thumb_width, thumb_height, output_dir
         );
     println!("Executing: {}", thumbnail_cmd);
@@ -607,7 +607,7 @@ fn extract_secondary_video_as_cover(
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libaom-av1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -q:v 50 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' {}/thumbnail.avif -y",
         input_file, stream_selector, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -663,7 +663,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libaom-av1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -b:v 0 {}/thumbnail.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -q:v 50 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' {}/thumbnail.avif -y",
         input_file, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
@@ -898,7 +898,9 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
             " -an ".to_string()
         };
         let bitrate_value = bitrate.max(0) as u32;
-        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {}{}-metadata:s:v:0 bps={} -f webm {} ",
+        // Add setsar=1:1 to ensure consistent aspect ratio across all resolutions
+        // This fixes "Conflicting stream aspect ratios" error in DASH
+        cmd.push_str(format!(" -vf 'scale={}:{},fps={},format=nv12,setsar=1:1,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {}{}-metadata:s:v:0 bps={} -f webm {} ",
         w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_flags, bitrate_value, output_file).as_str());
     }
 
