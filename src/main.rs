@@ -735,10 +735,7 @@ fn format_timestamp_vtt(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, secs, millis)
 }
 
-async fn transcode_video_main(
-    input_file: &str,
-    output_dir: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
     ffmpeg_next::init()?;
 
     let input_context = format::input(&input_file)?;
@@ -764,6 +761,7 @@ async fn transcode_video_main(
     } else {
         framerate = fps;
     }
+    let duration = input_context.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64; // Video duration in seconds
 
     let base_bitrate_per_pixel = 4; // 33 Mbps for 4k
     let base_max_bitrate_per_pixel = 5; // 41 Mbps for 4k
@@ -823,21 +821,12 @@ async fn transcode_video_main(
         w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_bitrate, output_file).as_str());
     }
 
-    println!("Executing video transcoding: {}", cmd);
-    let status = tokio::process::Command::new("sh")
+    println!("Executing: {}", cmd);
+    Command::new("sh")
         .arg("-c")
         .arg(&cmd)
         .status()
-        .await
         .expect("Failed to execute ffmpeg command");
-
-    if !status.success() {
-        return Err(format!(
-            "Video transcoding failed with exit code: {:?}",
-            status.code()
-        )
-        .into());
-    }
 
     println!("Creating WebM DASH manifest...");
     webm_files.retain(|file| fs::metadata(file).is_ok());
@@ -860,21 +849,12 @@ async fn transcode_video_main(
             dash_input_cmds, maps, dash_output_dir
         );
 
-    println!("Executing DASH: {}", dash_output_cmd);
-    let dash_status = tokio::process::Command::new("sh")
+    println!("Executing: {}", dash_output_cmd);
+    Command::new("sh")
         .arg("-c")
         .arg(dash_output_cmd)
         .status()
-        .await
         .expect("Failed to create WebM DASH stream");
-
-    if !dash_status.success() {
-        return Err(format!(
-            "DASH creation failed with exit code: {:?}",
-            dash_status.code()
-        )
-        .into());
-    }
 
     //OGP video
     let ogp_video_result = fs::rename(
@@ -890,14 +870,7 @@ async fn transcode_video_main(
         fs::remove_file(file).expect("Failed to delete WebM file");
     }
 
-    Ok(())
-}
-
-async fn generate_thumbnails(
-    input_file: &str,
-    output_dir: &str,
-    duration: f64,
-) -> Result<(), Box<dyn std::error::Error>> {
+    // generovat thumbnails
     let random_time = rand::thread_rng().gen_range(0.0..duration);
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
@@ -905,31 +878,14 @@ async fn generate_thumbnails(
         "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 -c:v libsvtav1 -pix_fmt yuv420p {}/thumbnail.avif",
         random_time, input_file, output_dir, output_dir
     );
-    println!("Executing thumbnails: {}", thumbnail_cmd);
-    let status = tokio::process::Command::new("sh")
+    println!("Executing: {}", thumbnail_cmd);
+    Command::new("sh")
         .arg("-c")
         .arg(thumbnail_cmd)
         .status()
-        .await
         .expect("Failed to generate thumbnails");
 
-    if !status.success() {
-        return Err(format!(
-            "Thumbnail generation failed with exit code: {:?}",
-            status.code()
-        )
-        .into());
-    }
-
-    Ok(())
-}
-
-async fn generate_sprite_and_vtt(
-    input_file: &str,
-    output_dir: &str,
-    duration: f64,
-    input_fr: ffmpeg_next::util::rational::Rational,
-) -> Result<(), Box<dyn std::error::Error>> {
+    // Generate thumbnail sprites for vidstack.io (max 100 sprites per file)
     let preview_output_dir = format!("{}/previews", output_dir);
     fs::create_dir_all(&preview_output_dir).expect("Failed to create preview output directory");
 
@@ -938,19 +894,6 @@ async fn generate_sprite_and_vtt(
     let thumb_height = 90;
     let max_sprites_per_file = 100;
     let sprites_across = 10; // 10 thumbnails per row in the sprite
-
-    let framerate: f32;
-    let fps = if input_fr.denominator() == 0 {
-        30.0
-    } else {
-        input_fr.numerator() as f32 / input_fr.denominator() as f32
-    };
-
-    if fps > 120.0 {
-        framerate = 120.0;
-    } else {
-        framerate = fps;
-    }
 
     // Calculate number of thumbnails needed
     let num_thumbnails = (duration / interval_seconds).ceil() as u32;
@@ -961,9 +904,7 @@ async fn generate_sprite_and_vtt(
         num_sprite_files, num_thumbnails, max_sprites_per_file
     );
 
-    // Generate each sprite file in parallel using tokio::spawn
-    let mut sprite_tasks = Vec::new();
-
+    // Generate each sprite file
     for sprite_idx in 0..num_sprite_files {
         let start_thumb_idx = sprite_idx * max_sprites_per_file;
         let end_thumb_idx = ((start_thumb_idx + max_sprites_per_file).min(num_thumbnails)) as u32;
@@ -972,60 +913,45 @@ async fn generate_sprite_and_vtt(
             ((thumbs_in_this_file as f32) / (sprites_across as f32)).ceil() as u32;
 
         let start_time = (start_thumb_idx as f64) * interval_seconds;
-        let input_file = input_file.to_string();
-        let preview_output_dir = preview_output_dir.clone();
+
         let sprite_path = format!("{}/preview_sprite_{}.avif", preview_output_dir, sprite_idx);
         let duration_for_this_file = thumbs_in_this_file as f64 * interval_seconds;
-        let interval_seconds_clone = interval_seconds;
-        let thumb_width_clone = thumb_width;
-        let thumb_height_clone = thumb_height;
-        let sprites_across_clone = sprites_across;
 
-        let task = tokio::spawn(async move {
-            let tile_filter = format!(
-                "fps=1/{:.3}:start_time={:.3},scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,tile={}x{}",
-                interval_seconds_clone, start_time, thumb_width_clone, thumb_height_clone, thumb_width_clone, thumb_height_clone,
-                sprites_across_clone, rows_in_this_file
-            );
+        let tile_filter = format!(
+            "fps=1/{:.3},scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,tile={}x{}",
+            interval_seconds, thumb_width, thumb_height, thumb_width, thumb_height,
+            sprites_across, rows_in_this_file
+        );
 
-            let sprite_cmd = format!(
-                "ffmpeg -y -ss {} -t {} -i {} -vf '{}' -r {} -frames:v 1 -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 {}",
-                start_time, duration_for_this_file, input_file, tile_filter, framerate, sprite_path
-            );
+        let sprite_cmd = format!(
+            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -pix_fmt yuv420p -q:v 50 {}",
+            start_time, duration_for_this_file, input_file, tile_filter, sprite_path
+        );
 
-            println!("Executing sprite {}: {}", sprite_idx, sprite_cmd);
-            let status = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(&sprite_cmd)
-                .status()
-                .await;
+        println!("Executing sprite {}: {}", sprite_idx, sprite_cmd);
+        let sprite_status = Command::new("sh").arg("-c").arg(&sprite_cmd).status();
 
-            match status {
-                Ok(exit_status) if exit_status.success() => {
-                    println!("Sprite {} generated successfully", sprite_idx);
-                    Ok(())
-                }
-                Ok(exit_status) => Err(format!(
-                    "Sprite {} generation failed with exit code: {:?}",
-                    sprite_idx,
-                    exit_status.code()
-                )),
-                Err(e) => Err(format!(
-                    "Failed to execute sprite {} command: {}",
-                    sprite_idx, e
-                )),
+        match sprite_status {
+            Ok(status) if status.success() => {
+                println!("Sprite {} generated successfully", sprite_idx);
             }
-        });
-
-        sprite_tasks.push(task);
+            Ok(status) => {
+                eprintln!(
+                    "Warning: Sprite {} generation failed with exit code: {:?}",
+                    sprite_idx,
+                    status.code()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to execute sprite {} command: {}",
+                    sprite_idx, e
+                );
+            }
+        }
     }
 
-    // Wait for all sprite generation to complete
-    for task in sprite_tasks {
-        task.await??;
-    }
-
-    // Generate WebVTT file
+    // Generate WebVTT file with sprite coordinates
     let mut vtt_cues: Vec<ThumbnailCue> = Vec::new();
 
     for i in 0..num_thumbnails {
@@ -1049,6 +975,7 @@ async fn generate_sprite_and_vtt(
         });
     }
 
+    // Write WebVTT file
     let vtt_path = format!("{}/previews.vtt", preview_output_dir);
     let mut vtt_content = String::from("WEBVTT\n\n");
 
@@ -1069,16 +996,12 @@ async fn generate_sprite_and_vtt(
         num_sprite_files
     );
 
-    Ok(())
-}
-
-async fn extract_audio_track(
-    input_file: &str,
-    output_dir: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+    // Extract standalone audio track from video (similar to audio file processing)
+    // Check if audio codec is lossless or high quality
     let audio_codec = get_audio_codec(input_file);
     let audio_bitrate = get_audio_bitrate(input_file);
 
+    // Use higher bitrate for lossless/high-quality sources or if source bitrate is high
     let opus_bitrate = if audio_codec == "flac"
         || audio_codec == "wav"
         || audio_codec == "pcm_s16le"
@@ -1095,61 +1018,12 @@ async fn extract_audio_track(
         "ffmpeg -i {} -vn -c:a libopus -b:a {} -vbr on -application audio {} -y",
         input_file, opus_bitrate, audio_output_path
     );
-    println!("Executing audio extraction: {}", extract_audio_cmd);
-    let status = tokio::process::Command::new("sh")
+    println!("Executing: {}", extract_audio_cmd);
+    Command::new("sh")
         .arg("-c")
-        .arg(extract_audio_cmd)
+        .arg(&extract_audio_cmd)
         .status()
-        .await
         .expect("Failed to extract audio from video");
 
-    if !status.success() {
-        return Err(format!(
-            "Audio extraction failed with exit code: {:?}",
-            status.code()
-        )
-        .into());
-    }
-
     Ok(())
-}
-
-fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Get video info synchronously first
-    ffmpeg_next::init()?;
-    let input_context = format::input(&input_file)?;
-    let video_stream = input_context
-        .streams()
-        .best(media::Type::Video)
-        .ok_or(ffmpeg_next::Error::StreamNotFound)?;
-    let fr_for_sprites = video_stream.avg_frame_rate();
-    let duration = input_context.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64;
-
-    // Clone values for async tasks
-    let input_file_main = input_file.to_string();
-    let input_file_thumb = input_file.to_string();
-    let input_file_sprite = input_file.to_string();
-    let input_file_audio = input_file.to_string();
-    let output_dir_main = output_dir.to_string();
-    let output_dir_thumb = output_dir.to_string();
-    let output_dir_sprite = output_dir.to_string();
-    let output_dir_audio = output_dir.to_string();
-
-    // Create Tokio runtime and run all tasks in parallel using try_join!
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let video_task = transcode_video_main(&input_file_main, &output_dir_main);
-        let thumbnail_task = generate_thumbnails(&input_file_thumb, &output_dir_thumb, duration);
-        let sprite_task = generate_sprite_and_vtt(
-            &input_file_sprite,
-            &output_dir_sprite,
-            duration,
-            fr_for_sprites,
-        );
-        let audio_task = extract_audio_track(&input_file_audio, &output_dir_audio);
-
-        tokio::try_join!(video_task, thumbnail_task, sprite_task, audio_task)?;
-
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })
 }
