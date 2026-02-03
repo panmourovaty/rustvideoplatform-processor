@@ -87,7 +87,6 @@ fn detect_file_type(input_file: &str) -> Option<String> {
             Ok(dur_res) if dur_res.status.success() => {
                 let dur_str = String::from_utf8_lossy(&dur_res.stdout);
                 let duration: f64 = dur_str.trim().parse().unwrap_or(0.0);
-                // If duration is very short (<=1s), likely just cover art
                 if duration <= 1.0 {
                     return Some("audio".to_string());
                 }
@@ -95,47 +94,101 @@ fn detect_file_type(input_file: &str) -> Option<String> {
             _ => {}
         }
 
-        // Check frame count to differentiate video from static image
-        let frame_cmd = format!(
-            "ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of default=noprint_wrappers=1:nokey=1 {}",
+        // Check if it's a real video
+        let nb_frames_cmd = format!(
+            "ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 {}",
             input_file
         );
 
-        let frame_output = Command::new("sh").arg("-c").arg(&frame_cmd).output();
+        let nb_frames_output = Command::new("sh").arg("-c").arg(&nb_frames_cmd).output();
 
-        match frame_output {
-            Ok(frame_result) if frame_result.status.success() => {
-                let frame_str = String::from_utf8_lossy(&frame_result.stdout);
-                let frame_count: i32 = frame_str.trim().parse().unwrap_or(1);
-                if frame_count > 1 {
-                    return Some("video".to_string());
-                } else {
-                    // Single frame video stream with audio = audio file with cover art
-                    return Some("audio".to_string());
-                }
-            }
-            _ => {
-                // If frame counting fails, fall back to duration check
-                let duration_cmd = format!(
-                    "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
-                    input_file
-                );
-
-                let dur_result = Command::new("sh").arg("-c").arg(&duration_cmd).output();
-
-                match dur_result {
-                    Ok(dur_res) if dur_res.status.success() => {
-                        let dur_str = String::from_utf8_lossy(&dur_res.stdout);
-                        let duration: f64 = dur_str.trim().parse().unwrap_or(0.0);
-                        if duration > 5.0 {
+        match nb_frames_output {
+            Ok(result) if result.status.success() => {
+                let frames_str = String::from_utf8_lossy(&result.stdout);
+                let frames_str = frames_str.trim();
+                if !frames_str.is_empty() && frames_str != "N/A" {
+                    if let Ok(frame_count) = frames_str.parse::<i64>() {
+                        if frame_count > 1 {
                             return Some("video".to_string());
                         } else {
                             return Some("audio".to_string());
                         }
                     }
-                    _ => return Some("audio".to_string()),
+                }
+                // If parsing fails or empty, continue to next method
+            }
+            _ => {}
+        }
+
+        // Calculate frame count from duration * fps
+        let stream_info_cmd = format!(
+            "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,avg_frame_rate -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            input_file
+        );
+
+        let info_output = Command::new("sh").arg("-c").arg(&stream_info_cmd).output();
+
+        match info_output {
+            Ok(result) if result.status.success() => {
+                let info_str = String::from_utf8_lossy(&result.stdout);
+                let lines: Vec<&str> = info_str.lines().collect();
+
+                if lines.len() >= 3 {
+                    // Parse duration from format section
+                    let duration: f64 = lines[0].trim().parse().unwrap_or(0.0);
+
+                    // Parse frame rate (try r_frame_rate first, then avg_frame_rate)
+                    let fps_str = lines[1].trim();
+                    let fps = if fps_str.contains('/') {
+                        let parts: Vec<&str> = fps_str.split('/').collect();
+                        if parts.len() == 2 {
+                            let num: f64 = parts[0].parse().unwrap_or(0.0);
+                            let den: f64 = parts[1].parse().unwrap_or(1.0);
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            fps_str.parse().unwrap_or(0.0)
+                        }
+                    } else {
+                        fps_str.parse().unwrap_or(0.0)
+                    };
+
+                    if duration > 0.0 && fps > 0.0 {
+                        let estimated_frames = (duration * fps) as i64;
+                        // If video is longer than 1 second with valid fps, it's likely a real video
+                        if duration > 1.0 && estimated_frames > 5 {
+                            return Some("video".to_string());
+                        } else {
+                            return Some("audio".to_string());
+                        }
+                    }
                 }
             }
+            _ => {}
+        }
+
+        // Use duration as fallback heuristic
+        let duration_cmd = format!(
+            "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            input_file
+        );
+
+        let dur_result = Command::new("sh").arg("-c").arg(&duration_cmd).output();
+
+        match dur_result {
+            Ok(dur_res) if dur_res.status.success() => {
+                let dur_str = String::from_utf8_lossy(&dur_res.stdout);
+                let duration: f64 = dur_str.trim().parse().unwrap_or(0.0);
+                if duration > 5.0 {
+                    return Some("video".to_string());
+                } else {
+                    return Some("audio".to_string());
+                }
+            }
+            _ => return Some("audio".to_string()),
         }
     }
 
