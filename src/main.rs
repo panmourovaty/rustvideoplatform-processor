@@ -975,7 +975,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         .status()
         .expect("Failed to generate thumbnails");
 
-    // Generate thumbnail sprites for vidstack.io (max 100 sprites per file)
+    // Generate thumbnail sprites
     let preview_output_dir = format!("{}/previews", output_dir);
     fs::create_dir_all(&preview_output_dir).expect("Failed to create preview output directory");
 
