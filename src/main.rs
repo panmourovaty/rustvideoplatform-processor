@@ -595,7 +595,7 @@ fn extract_secondary_video_as_cover(
 
     // Extract full resolution cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -q:v 26 {}/picture.avif -y",
         input_file, stream_selector, output_dir
     );
     println!("Executing: {}", cover_cmd);
@@ -651,7 +651,7 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Extract full resolution album cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libaom-av1 -crf 26 -b:v 0 {}/picture.avif -y",
+        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -q:v 26 {}/picture.avif -y",
         input_file, output_dir
     );
     println!("Executing: {}", cover_cmd);
