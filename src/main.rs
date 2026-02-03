@@ -979,6 +979,30 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         .status()
         .expect("Failed to generate thumbnails");
 
+    // Generate animated showcase.avif (60 frames from beginning for slow live preview)
+    println!("Generating showcase.avif (60 frame animated preview)...");
+    let showcase_cmd = format!(
+        "ffmpeg -y -i {} -vf 'scale=480:-1:force_original_aspect_ratio=decrease,fps=2,format=yuv420p' -frames:v 60 -c:v libsvtav1 -pix_fmt yuv420p -q:v 40 {}/showcase.avif",
+        input_file, output_dir
+    );
+    println!("Executing: {}", showcase_cmd);
+    let showcase_status = Command::new("sh")
+        .arg("-c")
+        .arg(&showcase_cmd)
+        .status();
+
+    match showcase_status {
+        Ok(status) if status.success() => {
+            println!(" showcase.avif generated successfully");
+        }
+        Ok(status) => {
+            eprintln!("Warning: showcase.avif generation failed with exit code: {:?}", status.code());
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to execute showcase command: {}", e);
+        }
+    }
+
     // Generate thumbnail sprites for vidstack.io (max 100 sprites per file)
     let preview_output_dir = format!("{}/previews", output_dir);
     fs::create_dir_all(&preview_output_dir).expect("Failed to create preview output directory");
