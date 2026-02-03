@@ -854,9 +854,9 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     }
     let duration = input_context.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64; // Video duration in seconds
 
-    let base_bitrate_per_pixel = 4; // 33 Mbps for 4k
-    let base_max_bitrate_per_pixel = 5; // 41 Mbps for 4k
-    let mut audio_bitrate = 300; // 300 kbit
+    let base_bitrate_per_pixel = 3; // 4 -33 Mbps for 4k
+    let base_max_bitrate_per_pixel = 4; // 5 - 41 Mbps for 4k
+    let mut audio_bitrate = 256; // 300 kbit
 
     // Calculate aspect ratio once to ensure all resolutions maintain it
     let aspect_ratio = original_width as f32 / original_height as f32;
