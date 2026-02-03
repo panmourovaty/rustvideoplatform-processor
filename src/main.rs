@@ -737,10 +737,17 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     let original_width = video_decoder.width();
     let original_height = video_decoder.height();
     let framerate: f32;
-    if video_stream.avg_frame_rate().0 as f32 > 120.0 {
+    let (num, den) = video_stream.avg_frame_rate();
+    let fps = if den == 0 {
+        30.0 // fallback to 30fps if denominator is 0
+    } else {
+        num as f32 / den as f32
+    };
+
+    if fps > 120.0 {
         framerate = 120.0;
     } else {
-        framerate = video_stream.avg_frame_rate().0 as f32;
+        framerate = fps;
     }
     let duration = input_context.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64; // Video duration in seconds
 
