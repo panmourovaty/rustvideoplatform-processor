@@ -240,7 +240,11 @@ fn detect_file_type(input_file: &str) -> Option<String> {
                         if parts.len() == 2 {
                             let num: f64 = parts[0].parse().unwrap_or(0.0);
                             let den: f64 = parts[1].parse().unwrap_or(1.0);
-                            if den > 0.0 { num / den } else { 0.0 }
+                            if den > 0.0 {
+                                num / den
+                            } else {
+                                0.0
+                            }
                         } else {
                             fps_str.parse().unwrap_or(0.0)
                         }
@@ -893,8 +897,8 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         ));
 
         // Halve dimensions while maintaining aspect ratio (make dimensions even)
-        width = ((width as f32 / 2.0 / aspect_ratio).round() * aspect_ratio).round() as i32;
-        height = (width as f32 / aspect_ratio).round() as i32;
+        width = ((width as f32 / 2.0 / aspect_ratio).round() * aspect_ratio).round() as u32;
+        height = (width as f32 / aspect_ratio).round() as u32;
         // Ensure dimensions are even (required for many codecs)
         width = (width / 2) * 2;
         height = (height / 2) * 2;
@@ -965,7 +969,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     }
 
     // generovat thumbnails
-    let random_time = rand::thread_rng().gen_range(0.0..duration);
+    let random_time = rand::rng().random_range(0.0..duration);
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
     let thumbnail_cmd = format!(
@@ -986,17 +990,17 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         input_file, output_dir
     );
     println!("Executing: {}", showcase_cmd);
-    let showcase_status = Command::new("sh")
-        .arg("-c")
-        .arg(&showcase_cmd)
-        .status();
+    let showcase_status = Command::new("sh").arg("-c").arg(&showcase_cmd).status();
 
     match showcase_status {
         Ok(status) if status.success() => {
             println!(" showcase.avif generated successfully");
         }
         Ok(status) => {
-            eprintln!("Warning: showcase.avif generation failed with exit code: {:?}", status.code());
+            eprintln!(
+                "Warning: showcase.avif generation failed with exit code: {:?}",
+                status.code()
+            );
         }
         Err(e) => {
             eprintln!("Warning: Failed to execute showcase command: {}", e);
