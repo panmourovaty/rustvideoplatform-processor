@@ -934,7 +934,7 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, String
 
             // Only add global_quality if not using ICQ-like quality mode
             if settings.global_quality > 0 {
-                params.push_str(&format!(" -global_quality {}", settings.global_quality));
+                params.push_str(&format!(" -global_quality:v {}", settings.global_quality));
             }
 
             (
@@ -1058,22 +1058,22 @@ fn transcode_video(
 
         let cmd = match encoder_type {
             EncoderType::Qsv => {
-                // QSV scale filter doesn't support force_original_aspect_ratio
+                // QSV: hardware filter with format embedded, no fps filter, no pix_fmt
                 format!(
-                    "ffmpeg -y {} -i {} -vf 'scale_qsv=w={}:h={}:mode=hq,fps={},format=p010le' -pix_fmt p010le {} -c:a libopus -b:a {}k -f webm {}",
-                    hwaccel_args, input_file, w, h, framerate, codec_params, audio_bitrate, output_file
+                    "ffmpeg -y {} -i {} -vf 'scale_qsv=w={}:h={}:mode=hq:format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                    hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                 )
             }
             EncoderType::Nvenc => {
                 format!(
-                    "ffmpeg -y {} -i {} -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true,fps={}' -pix_fmt p010le {} -c:a libopus -b:a {}k -f webm {}",
-                    hwaccel_args, input_file, w, h, framerate, codec_params, audio_bitrate, output_file
+                    "ffmpeg -y {} -i {} -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -c:a libopus -b:a {}k -f webm {}",
+                    hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                 )
             }
             EncoderType::Vaapi => {
                 format!(
-                    "ffmpeg -y {} -i {} -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,fps={},format=p010le' -pix_fmt p010le {} -c:a libopus -b:a {}k -f webm {}",
-                    hwaccel_args, input_file, w, h, framerate, codec_params, audio_bitrate, output_file
+                    "ffmpeg -y {} -i {} -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                    hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                 )
             }
         };
