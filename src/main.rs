@@ -535,6 +535,23 @@ fn get_audio_codec(input_file: &str) -> String {
     }
 }
 
+fn get_audio_bitrate(input_file: &str) -> u32 {
+    let bitrate_cmd = format!(
+        "ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    let output = Command::new("sh").arg("-c").arg(&bitrate_cmd).output();
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let bitrate_str = String::from_utf8_lossy(&result.stdout);
+            bitrate_str.trim().parse().unwrap_or(128000)
+        }
+        _ => 128000, // Default to 128 kbps if unknown
+    }
+}
+
 fn has_video_stream(input_file: &str) -> bool {
     let probe_cmd = format!(
         "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
@@ -548,6 +565,197 @@ fn has_video_stream(input_file: &str) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_cover_art_video(input_file: &str) -> bool {
+    // Check if video stream duration is very short compared to audio
+    // This typically indicates cover art/album art in a music file
+    let duration_cmd = format!(
+        "ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+
+    match Command::new("sh").arg("-c").arg(&duration_cmd).output() {
+        Ok(result) if result.status.success() => {
+            let dur_str = String::from_utf8_lossy(&result.stdout);
+            match dur_str.trim().parse::<f64>() {
+                Ok(duration) if duration <= 1.0 => true,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn count_audio_streams(input_file: &str) -> u32 {
+    let count_cmd = format!(
+        "ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 {} | wc -l",
+        input_file
+    );
+
+    match Command::new("sh").arg("-c").arg(&count_cmd).output() {
+        Ok(result) if result.status.success() => {
+            let count_str = String::from_utf8_lossy(&result.stdout);
+            count_str.trim().parse().unwrap_or(1)
+        }
+        _ => 1,
+    }
+}
+
+fn count_video_streams(input_file: &str) -> u32 {
+    let count_cmd = format!(
+        "ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 {} | wc -l",
+        input_file
+    );
+
+    match Command::new("sh").arg("-c").arg(&count_cmd).output() {
+        Ok(result) if result.status.success() => {
+            let count_str = String::from_utf8_lossy(&result.stdout);
+            count_str.trim().parse().unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+fn extract_additional_audio(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
+    // Get total number of audio streams
+    let count_cmd = format!(
+        "ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 {}",
+        input_file
+    );
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&count_cmd)
+        .output()
+        .expect("Failed to count audio streams");
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let streams: Vec<&str> = output_str.trim().split('\n').collect();
+
+    // Skip the first audio stream (usually the main one) and process additional ones
+    for (idx, _) in streams.iter().enumerate().skip(1) {
+        let stream_idx = idx; // 0-based index for ffmpeg (stream 1 is index 0)
+        let audio_codec = get_audio_codec_for_stream(input_file, stream_idx as u32);
+
+        let bitrate = if audio_codec == "flac" || audio_codec == "wav" || audio_codec == "pcm_s16le"
+        {
+            "300k"
+        } else {
+            "256k"
+        };
+
+        let output_path = format!("{}/audio_{}.ogg", output_dir, idx + 1);
+        let extract_cmd = format!(
+            "ffmpeg -i {} -map 0:a:{} -c:a libopus -b:a {} -vbr on -application audio {} -y",
+            input_file, stream_idx, bitrate, output_path
+        );
+
+        println!("Executing: {}", extract_cmd);
+        Command::new("sh")
+            .arg("-c")
+            .arg(&extract_cmd)
+            .status()
+            .expect(&format!("Failed to extract audio stream {}", idx + 1));
+    }
+
+    Ok(())
+}
+
+fn get_audio_codec_for_stream(input_file: &str, stream_idx: u32) -> String {
+    let codec_cmd = format!(
+        "ffprobe -v error -select_streams a:{} -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 {}",
+        stream_idx, input_file
+    );
+
+    let output = Command::new("sh").arg("-c").arg(&codec_cmd).output();
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let codec = String::from_utf8_lossy(&result.stdout);
+            codec.trim().to_lowercase()
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+fn extract_secondary_video_as_cover(
+    input_file: &str,
+    output_dir: &str,
+) -> Result<(), ffmpeg_next::Error> {
+    // Get dimensions of the secondary video stream (usually the cover art)
+    let probe_cmd = format!(
+        "ffprobe -v error -select_streams v:1 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+        input_file
+    );
+
+    let output = Command::new("sh").arg("-c").arg(&probe_cmd).output();
+
+    let (orig_width, orig_height) = match output {
+        Ok(result) if result.status.success() => {
+            let dimensions = String::from_utf8_lossy(&result.stdout);
+            parse_dimensions(&dimensions)
+        }
+        _ => {
+            // Fallback to first video stream
+            let probe_cmd = format!(
+                "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+                input_file
+            );
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(&probe_cmd)
+                .output()
+                .expect("Failed to probe video dimensions");
+            let dimensions = String::from_utf8_lossy(&output.stdout);
+            parse_dimensions(&dimensions)
+        }
+    };
+
+    // Calculate scaled dimensions for HD thumbnail
+    let (thumb_width, thumb_height) = calculate_hd_scale(orig_width, orig_height);
+
+    // Check if we have multiple video streams
+    let video_count = count_video_streams(input_file);
+    let stream_selector = if video_count > 1 { "v:1" } else { "v:0" };
+
+    // Extract full resolution cover
+    let cover_cmd = format!(
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif -y",
+        input_file, stream_selector, output_dir
+    );
+    println!("Executing: {}", cover_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(&cover_cmd)
+        .status()
+        .expect("Failed to extract cover art");
+
+    // Create thumbnail AVIF
+    let thumbnail_cmd = format!(
+        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif -y",
+        input_file, stream_selector, thumb_width, thumb_height, output_dir
+    );
+    println!("Executing: {}", thumbnail_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(&thumbnail_cmd)
+        .status()
+        .expect("Failed to create cover thumbnail");
+
+    // Create thumbnail JPG for older devices
+    let thumbnail_jpg_cmd = format!(
+        "ffmpeg -i {} -map 0:{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 {}/thumbnail.jpg -y",
+        input_file, stream_selector, thumb_width, thumb_height, output_dir
+    );
+    println!("Executing: {}", thumbnail_jpg_cmd);
+    Command::new("sh")
+        .arg("-c")
+        .arg(&thumbnail_jpg_cmd)
+        .status()
+        .expect("Failed to create cover thumbnail JPG");
+
+    Ok(())
 }
 
 fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
@@ -677,14 +885,21 @@ struct ThumbnailCue {
     sprite_idx: u32,
 }
 
-fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, VideoCodecParams) {
+#[derive(Clone, Copy)]
+enum EncoderType {
+    Nvenc,
+    Qsv,
+    Vaapi,
+}
+
+fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, String, EncoderType) {
     match config.encoder {
         VideoEncoder::Nvenc => {
             let settings = config.nvenc.as_ref().expect("NVENC settings required");
             let hwaccel = "-hwaccel cuda -hwaccel_output_format cuda".to_string();
 
             let mut params = format!(
-                "-c:v {} -preset {} -tier {} -rc {} -cq {} -qmin {} -qmax {}",
+                "-c:v {} -preset {} -pix_fmt p010le -tier {} -rc {} -cq {} -qmin {} -qmax {}",
                 settings.codec,
                 settings.preset,
                 settings.tier,
@@ -703,39 +918,29 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, VideoC
 
             (
                 hwaccel,
-                VideoCodecParams {
-                    codec: settings.codec.clone(),
-                    params,
-                    framerate,
-                },
+                params,
+                EncoderType::Nvenc,
             )
         }
         VideoEncoder::Qsv => {
             let settings = config.qsv.as_ref().expect("QSV settings required");
-            let hwaccel = "-hwaccel qsv -hwaccel_output_format qsv".to_string();
+            let hwaccel = "-hwaccel qsv".to_string();
 
+            // Use simpler parameters for Intel Arc compatibility
             let mut params = format!(
-                "-c:v {} -preset {} -global_quality {} -extbrc 1",
-                settings.codec, settings.preset, settings.global_quality
+                "-c:v {} -preset {} -pix_fmt p010le",
+                settings.codec, settings.preset
             );
 
-            if let Some(la) = settings.lookahead {
-                params.push_str(&format!(
-                    " -look_ahead {}",
-                    if la > 0 { "on" } else { "off" }
-                ));
-                if let Some(depth) = settings.look_ahead_depth {
-                    params.push_str(&format!(" -look_ahead_depth {}", depth));
-                }
+            // Only add global_quality if not using ICQ-like quality mode
+            if settings.global_quality > 0 {
+                params.push_str(&format!(" -global_quality {}", settings.global_quality));
             }
 
             (
                 hwaccel,
-                VideoCodecParams {
-                    codec: settings.codec.clone(),
-                    params,
-                    framerate,
-                },
+                params,
+                EncoderType::Qsv,
             )
         }
         VideoEncoder::Vaapi => {
@@ -744,7 +949,7 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, VideoC
 
             let quality = settings.quality;
             let mut params = format!(
-                "-c:v {} -global_quality {} -qp {}",
+                "-c:v {} -global_quality {} -qp {} -pix_fmt p010le",
                 settings.codec, quality, quality
             );
 
@@ -752,29 +957,14 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, VideoC
 
             (
                 hwaccel,
-                VideoCodecParams {
-                    codec: settings.codec.clone(),
-                    params,
-                    framerate,
-                },
+                params,
+                EncoderType::Vaapi,
             )
         }
     }
 }
 
-#[derive(Clone)]
-struct VideoCodecParams {
-    codec: String,
-    params: String,
-    framerate: f32,
-}
 
-fn format_video_params(codec_params: &VideoCodecParams, width: u32, height: u32) -> String {
-    format!(
-        "{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={}'",
-        codec_params.params, width, height, codec_params.framerate
-    )
-}
 
 fn format_timestamp_vtt(seconds: f64) -> String {
     let hours = (seconds / 3600.0) as u32;
@@ -858,24 +1048,53 @@ fn transcode_video(
     let mut webm_files = Vec::new();
     let dash_output_dir = format!("{}/video", output_dir);
 
-    // Build encoder-specific ffmpeg command
-    let (hwaccel_args, video_codec_params) = build_encoder_params(config, framerate);
+    // Build encoder-specific ffmpeg parameters
+    let (hwaccel_args, codec_params, encoder_type) = build_encoder_params(config, framerate);
 
-    let mut cmd = format!("ffmpeg -y {} -i {} ", hwaccel_args, input_file);
+    // Transcode each quality level separately (more reliable with hardware encoders)
     for (w, h, label, audio_bitrate) in &outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        let video_params = format_video_params(&video_codec_params, *w, *h);
-        cmd.push_str(&format!(" -vf '{},unsharp=3:3:1.0:3:3:0.0,format=p010le,hwupload' {} -c:a libopus -b:a {}k -f webm {} ",
-                config.filters, video_params, audio_bitrate, output_file));
-    }
 
-    println!("Executing: {}", cmd);
-    Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .status()
-        .expect("Failed to execute ffmpeg command");
+        let cmd = match encoder_type {
+            EncoderType::Qsv => {
+                format!(
+                    "ffmpeg -y {} -i {} -pix_fmt p010le -vf 'scale_qsv=w={}:h={}:force_original_aspect_ratio=decrease,fps={},format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                    hwaccel_args, input_file, w, h, framerate, codec_params, audio_bitrate, output_file
+                )
+            }
+            EncoderType::Nvenc => {
+                format!(
+                    "ffmpeg -y {} -i {} -pix_fmt p010le -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease,fps={}' {} -c:a libopus -b:a {}k -f webm {}",
+                    hwaccel_args, input_file, w, h, framerate, codec_params, audio_bitrate, output_file
+                )
+            }
+            EncoderType::Vaapi => {
+                format!(
+                    "ffmpeg -y {} -i {} -pix_fmt p010le -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,fps={},format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                    hwaccel_args, input_file, w, h, framerate, codec_params, audio_bitrate, output_file
+                )
+            }
+        };
+
+        println!("Executing: {}", cmd);
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .status();
+
+        match status {
+            Ok(status) if status.success() => {
+                println!("Generated: {}", output_file);
+            }
+            Ok(status) => {
+                eprintln!("FFmpeg failed with exit code: {:?} for {}", status.code(), label);
+            }
+            Err(e) => {
+                eprintln!("Failed to execute ffmpeg for {}: {}", label, e);
+            }
+        }
+    }
 
     println!("Creating WebM DASH manifest...");
     webm_files.retain(|file| fs::metadata(file).is_ok());
