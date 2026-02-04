@@ -854,8 +854,6 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     }
     let duration = input_context.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64; // Video duration in seconds
 
-    let base_bitrate_per_pixel = 3; // 4 -33 Mbps for 4k
-    let base_max_bitrate_per_pixel = 4; // 5- 41 Mbps for 4k
     let mut audio_bitrate = 256; // 300 kbit
 
     // Calculate aspect ratio once to ensure all resolutions maintain it
@@ -882,17 +880,14 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
             _ => unreachable!(),
         };
 
-        let bitrate = (width * height) * base_bitrate_per_pixel;
-        let max_bitrate = (width * height) * base_max_bitrate_per_pixel;
-        let min_bitrate = 10_000;
+        // ICQ quality level
+        let quality = 30;
 
         outputs.push((
             width,
             height,
             label,
-            bitrate,
-            max_bitrate,
-            min_bitrate,
+            quality,
             audio_bitrate,
         ));
 
@@ -912,11 +907,11 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         "ffmpeg -y -hwaccel vaapi -vaapi_device /dev/dri/renderD128 -i {} ",
         input_file
     );
-    for (w, h, label, bitrate, max_bitrate, min_bitrate, audio_bitrate) in outputs {
+    for (w, h, label, quality, audio_bitrate) in outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        cmd.push_str(format!(" -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={},unsharp=3:3:1.0:3:3:0.0,format=p010le,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
-        w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_bitrate, output_file).as_str());
+        cmd.push_str(format!(" -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={},unsharp=3:3:1.0:3:3:0.0,format=p010le,hwupload' -c:v av1_vaapi -global_quality {} -qp {} -compression_level 7 -lookahead 40 -c:a libopus -b:a {}k -f webm {} ",
+                w, h, framerate, quality, quality, audio_bitrate, output_file).as_str());
     }
 
     println!("Executing: {}", cmd);
