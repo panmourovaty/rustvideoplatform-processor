@@ -1029,14 +1029,16 @@ fn transcode_video(
             audio_bitrate += config.audio_bitrate_2k_bonus;
         }
 
-        outputs.push((width, height, step.label.clone(), audio_bitrate));
+        if !outputs.iter().any(|(w, h, _, _)| *w == width && *h == height) {
+            outputs.push((width, height, step.label.clone(), audio_bitrate));
+        }
 
-        // Calculate next resolution by dividing by scale_divisor
+        // Calculate next resolution
         let scale_factor = 1.0 / step.scale_divisor as f32;
-        width =
-            ((width as f32 * scale_factor / aspect_ratio).round() * aspect_ratio).round() as u32;
+        width = ((width as f32 * scale_factor / aspect_ratio).round() * aspect_ratio).round() as u32;
         height = (width as f32 / aspect_ratio).round() as u32;
-        // Ensure dimensions are even (required for many codecs)
+
+        // Ensure dimensions are even and respect min_dimension
         width = width.max(config.min_dimension);
         height = height.max(config.min_dimension);
         width = (width / 2) * 2;
@@ -1112,13 +1114,15 @@ fn transcode_video(
 
     let mut maps: String = String::new();
     for track_num in 0..webm_files.len() {
-        maps.push_str(format!(" -map {}:v -map {}:a ", track_num, track_num).as_str())
+        maps.push_str(&format!(" -map {}:v", track_num));
     }
 
+    maps.push_str(" -map 0:a");
+
     let dash_output_cmd = format!(
-            "ffmpeg -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
-            dash_input_cmds, maps, dash_output_dir
-        );
+        "ffmpeg -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
+        dash_input_cmds, maps, dash_output_dir
+    );
 
     println!("Executing: {}", dash_output_cmd);
     Command::new("sh")
