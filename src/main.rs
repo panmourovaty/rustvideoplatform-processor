@@ -1045,6 +1045,8 @@ fn transcode_video(
         audio_bitrate = (audio_bitrate / step.audio_bitrate_divisor).max(64);
     }
 
+    println!("Generated {} quality outputs: {:?}", outputs.len(), outputs.iter().map(|(_, _, label, _)| label.clone()).collect::<Vec<_>>());
+
     let mut webm_files = Vec::new();
     let dash_output_dir = format!("{}/video", output_dir);
 
@@ -1125,12 +1127,30 @@ fn transcode_video(
         .status()
         .expect("Failed to create WebM DASH stream");
 
-    //OGP video
-    let ogp_video_result = fs::rename(
-        format!("{}/output_quarter_resolution.webm", output_dir),
-        format!("{}/video/video.webm", output_dir),
-    );
-    webm_files.remove(2);
+    //OGP video - find quarter_resolution dynamically
+    let ogp_source = format!("{}/output_quarter_resolution.webm", output_dir);
+    let ogp_dest = format!("{}/video/video.webm", output_dir);
+
+    let ogp_video_result = if fs::metadata(&ogp_source).is_ok() {
+        fs::rename(&ogp_source, ogp_dest)
+    } else {
+        // Fallback: use the middle quality available
+        if !webm_files.is_empty() {
+            let middle_idx = webm_files.len() / 2;
+            let fallback_source = &webm_files[middle_idx];
+            let fallback_result = fs::rename(fallback_source, ogp_dest.clone());
+            webm_files.remove(middle_idx);
+            fallback_result
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No suitable OGP video found"))
+        }
+    };
+
+    // Remove quarter_resolution from webm_files list if it exists
+    if let Some(idx) = webm_files.iter().position(|f| f.ends_with("_quarter_resolution.webm")) {
+        webm_files.remove(idx);
+    }
+
     println!("CREATED OGP VIDEO: {:?}", ogp_video_result);
 
     // smazat mezividea
