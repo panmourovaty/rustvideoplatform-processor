@@ -899,7 +899,7 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, String
             let hwaccel = "-hwaccel cuda -hwaccel_output_format cuda".to_string();
 
             let mut params = format!(
-                "-c:v {} -preset {} -pix_fmt p010le -tier {} -rc {} -cq {} -qmin {} -qmax {}",
+                "-c:v {} -preset {} -tier {} -rc {} -cq {} -qmin {} -qmax {}",
                 settings.codec,
                 settings.preset,
                 settings.tier,
@@ -924,11 +924,11 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, String
         }
         VideoEncoder::Qsv => {
             let settings = config.qsv.as_ref().expect("QSV settings required");
-            let hwaccel = "-hwaccel qsv".to_string();
+            let hwaccel = "-hwaccel qsv -hwaccel_output_format qsv".to_string();
 
             // Use simpler parameters for Intel Arc compatibility
             let mut params = format!(
-                "-c:v {} -preset {} -pix_fmt p010le",
+                "-c:v {} -preset {}",
                 settings.codec, settings.preset
             );
 
@@ -949,7 +949,7 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, String
 
             let quality = settings.quality;
             let mut params = format!(
-                "-c:v {} -global_quality {} -qp {} -pix_fmt p010le",
+                "-c:v {} -global_quality {} -qp {}",
                 settings.codec, quality, quality
             );
 
@@ -1058,20 +1058,21 @@ fn transcode_video(
 
         let cmd = match encoder_type {
             EncoderType::Qsv => {
+                // QSV scale filter doesn't support force_original_aspect_ratio
                 format!(
-                    "ffmpeg -y {} -i {} -pix_fmt p010le -vf 'scale_qsv=w={}:h={}:force_original_aspect_ratio=decrease,fps={},format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                    "ffmpeg -y {} -i {} -vf 'scale_qsv=w={}:h={}:mode=hq,fps={},format=p010le' -pix_fmt p010le {} -c:a libopus -b:a {}k -f webm {}",
                     hwaccel_args, input_file, w, h, framerate, codec_params, audio_bitrate, output_file
                 )
             }
             EncoderType::Nvenc => {
                 format!(
-                    "ffmpeg -y {} -i {} -pix_fmt p010le -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease,fps={}' {} -c:a libopus -b:a {}k -f webm {}",
+                    "ffmpeg -y {} -i {} -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true,fps={}' -pix_fmt p010le {} -c:a libopus -b:a {}k -f webm {}",
                     hwaccel_args, input_file, w, h, framerate, codec_params, audio_bitrate, output_file
                 )
             }
             EncoderType::Vaapi => {
                 format!(
-                    "ffmpeg -y {} -i {} -pix_fmt p010le -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,fps={},format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                    "ffmpeg -y {} -i {} -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,fps={},format=p010le' -pix_fmt p010le {} -c:a libopus -b:a {}k -f webm {}",
                     hwaccel_args, input_file, w, h, framerate, codec_params, audio_bitrate, output_file
                 )
             }
