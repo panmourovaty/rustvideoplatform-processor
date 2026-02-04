@@ -972,21 +972,33 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     let random_time = rand::rng().random_range(0.0..duration);
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
-    let thumbnail_cmd = format!(
-        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 {}/thumbnail.jpg -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -f image2 {}/thumbnail.avif",
-        random_time, input_file, output_dir, output_dir
+    // Generate JPG thumbnail
+    let thumbnail_jpg_cmd = format!(
+        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 -update 1 {}/thumbnail.jpg",
+        random_time, input_file, output_dir
     );
-    println!("Executing: {}", thumbnail_cmd);
+    println!("Executing: {}", thumbnail_jpg_cmd);
     Command::new("sh")
         .arg("-c")
-        .arg(thumbnail_cmd)
+        .arg(&thumbnail_jpg_cmd)
         .status()
-        .expect("Failed to generate thumbnails");
+        .expect("Failed to generate jpg thumbnail");
 
-    // Generate animated showcase.avif (60 frames from beginning for slow live preview)
-    println!("Generating showcase.avif (60 frame animated preview)...");
+    // Generate AVIF thumbnail
+    let thumbnail_avif_cmd = format!(
+        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -update 1 {}/thumbnail.avif",
+        random_time, input_file, output_dir
+    );
+    println!("Executing: {}", thumbnail_avif_cmd);
+    let _ = Command::new("sh")
+        .arg("-c")
+        .arg(&thumbnail_avif_cmd)
+        .status();
+
+    // Generate animated showcase.avif
+    println!("Generating showcase.avif...");
     let showcase_cmd = format!(
-        "ffmpeg -y -i {} -vf 'scale=480:-1:force_original_aspect_ratio=decrease,fps=2,format=yuv420p10le' -frames:v 60 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 40 {}/showcase.avif",
+        "ffmpeg -y -i {} -vf 'scale=480:-1:force_original_aspect_ratio=decrease,fps=2,format=yuv420p10le' -frames:v 60 -c:v libaom-av1 -pix_fmt yuv420p10le -q:v 40 -cpu-used 6 -row-mt 1 {}/showcase.avif",
         input_file, output_dir
     );
     println!("Executing: {}", showcase_cmd);
@@ -1046,7 +1058,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         );
 
         let sprite_cmd = format!(
-            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 60 -r 1 -frames:v 1 -f image2 {}",
+            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 60 -r 1 -frames:v 1 -update 1 {}",
             start_time, duration_for_this_file, input_file, tile_filter, sprite_path
         );
 
