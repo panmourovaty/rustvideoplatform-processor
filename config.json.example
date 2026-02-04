@@ -1,0 +1,56 @@
+{
+    "dbconnection": "postgreqsql://user:password@localhost:5432/database",
+    "video": {
+        "encoder": "qsv",
+        "max_resolution_steps": 4,
+        "min_dimension": 240,
+        "fps_cap": 120.0,
+        "audio_bitrate_base": 256,
+        "threshold_2k_pixels": 3686400,
+        "audio_bitrate_2k_bonus": 100,
+        "quality_steps": [
+            {
+                "label": "original",
+                "scale_divisor": 1,
+                "audio_bitrate_divisor": 1
+            },
+            {
+                "label": "half_resolution",
+                "scale_divisor": 2,
+                "audio_bitrate_divisor": 2
+            },
+            {
+                "label": "quarter_resolution",
+                "scale_divisor": 4,
+                "audio_bitrate_divisor": 4
+            },
+            {
+                "label": "eighth_resolution",
+                "scale_divisor": 8,
+                "audio_bitrate_divisor": 8
+            }
+        ],
+        "filters": "unsharp=3:3:1.0:3:3:0.0,format=p010le",
+        "nvenc": {
+            "codec": "av1_nvenc",
+            "preset": "p7",
+            "tier": "high",
+            "rc": "vbr",
+            "cq": 26,
+            "lookahead": 32,
+            "temporal_aq": true
+        },
+        "qsv": {
+            "codec": "av1_qsv",
+            "preset": "veryslow",
+            "global_quality": 28,
+            "lookahead": 40,
+            "look_ahead_depth": 100
+        },
+        "vaapi": {
+            "codec": "av1_vaapi",
+            "quality": 51,
+            "compression_ratio": 5
+        }
+    }
+}

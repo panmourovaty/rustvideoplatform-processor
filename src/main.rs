@@ -16,6 +16,72 @@ use std::process::Command;
 #[derive(Deserialize, Clone)]
 struct Config {
     dbconnection: String,
+    video: VideoConfig,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "lowercase")]
+enum VideoEncoder {
+    Nvenc,
+    Qsv,
+    Vaapi,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct QualityStep {
+    label: String,
+    scale_divisor: u32,
+    audio_bitrate_divisor: u32,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct NvencSettings {
+    codec: String,
+    preset: String,
+    tier: String,
+    rc: String,
+    cq: u32,
+    #[serde(default)]
+    lookahead: Option<u32>,
+    #[serde(default)]
+    temporal_aq: Option<bool>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct QsvSettings {
+    codec: String,
+    preset: String,
+    global_quality: u32,
+    #[serde(default)]
+    lookahead: Option<u32>,
+    #[serde(default)]
+    look_ahead_depth: Option<u32>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct VaapiSettings {
+    codec: String,
+    quality: u32,
+    compression_ratio: u32,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct VideoConfig {
+    encoder: VideoEncoder,
+    max_resolution_steps: u32,
+    min_dimension: u32,
+    fps_cap: f32,
+    audio_bitrate_base: u32,
+    threshold_2k_pixels: u32,
+    audio_bitrate_2k_bonus: u32,
+    quality_steps: Vec<QualityStep>,
+    filters: String,
+    #[serde(default)]
+    nvenc: Option<NvencSettings>,
+    #[serde(default)]
+    qsv: Option<QsvSettings>,
+    #[serde(default)]
+    vaapi: Option<VaapiSettings>,
 }
 
 #[tokio::main]
@@ -28,7 +94,7 @@ async fn main() {
         .await
         .unwrap();
 
-    process(pool).await;
+    process(pool, config.video).await;
 }
 
 fn detect_file_type(input_file: &str) -> Option<String> {
@@ -291,7 +357,7 @@ fn detect_file_type(input_file: &str) -> Option<String> {
     return None;
 }
 
-async fn process(pool: PgPool) {
+async fn process(pool: PgPool, video_config: VideoConfig) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
 
     loop {
@@ -315,7 +381,7 @@ async fn process(pool: PgPool) {
 
             if actual_type == "video".to_owned() {
                 println!("processing concept: {} as video", concept.id);
-                process_video(concept.id, pool.clone()).await;
+                process_video(concept.id, pool.clone(), video_config.clone()).await;
             } else if actual_type == "picture".to_owned() {
                 println!("processing concept: {} as picture", concept.id);
                 process_picture(concept.id, pool.clone()).await;
@@ -327,12 +393,13 @@ async fn process(pool: PgPool) {
     }
 }
 
-async fn process_video(concept_id: String, pool: PgPool) {
+async fn process_video(concept_id: String, pool: PgPool, video_config: VideoConfig) {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .expect("Failed to create concept processing result directory");
     let transcode_result = transcode_video(
         format!("upload/{}", concept_id).as_str(),
         format!("upload/{}_processing", concept_id).as_str(),
+        &video_config,
     );
     if transcode_result.is_ok() {
         sqlx::query!(
@@ -818,6 +885,105 @@ struct ThumbnailCue {
     sprite_idx: u32,
 }
 
+fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, VideoCodecParams) {
+    match config.encoder {
+        VideoEncoder::Nvenc => {
+            let settings = config.nvenc.as_ref().expect("NVENC settings required");
+            let hwaccel = "-hwaccel cuda -hwaccel_output_format cuda".to_string();
+
+            let mut params = format!(
+                "-c:v {} -preset {} -tier {} -rc {} -cq {} -qmin {} -qmax {}",
+                settings.codec,
+                settings.preset,
+                settings.tier,
+                settings.rc,
+                settings.cq,
+                settings.cq + 10,
+                settings.cq.saturating_sub(10)
+            );
+
+            if let Some(la) = settings.lookahead {
+                params.push_str(&format!(" -lookahead {}", la));
+            }
+            if settings.temporal_aq.unwrap_or(false) {
+                params.push_str(" -temporal-aq 1");
+            }
+
+            (
+                hwaccel,
+                VideoCodecParams {
+                    codec: settings.codec.clone(),
+                    params,
+                    framerate,
+                },
+            )
+        }
+        VideoEncoder::Qsv => {
+            let settings = config.qsv.as_ref().expect("QSV settings required");
+            let hwaccel = "-hwaccel qsv -hwaccel_output_format qsv".to_string();
+
+            let mut params = format!(
+                "-c:v {} -preset {} -global_quality {} -extbrc 1",
+                settings.codec, settings.preset, settings.global_quality
+            );
+
+            if let Some(la) = settings.lookahead {
+                params.push_str(&format!(
+                    " -look_ahead {}",
+                    if la > 0 { "on" } else { "off" }
+                ));
+                if let Some(depth) = settings.look_ahead_depth {
+                    params.push_str(&format!(" -look_ahead_depth {}", depth));
+                }
+            }
+
+            (
+                hwaccel,
+                VideoCodecParams {
+                    codec: settings.codec.clone(),
+                    params,
+                    framerate,
+                },
+            )
+        }
+        VideoEncoder::Vaapi => {
+            let settings = config.vaapi.as_ref().expect("VAAPI settings required");
+            let hwaccel = "-hwaccel vaapi -vaapi_device /dev/dri/renderD128".to_string();
+
+            let quality = settings.quality;
+            let mut params = format!(
+                "-c:v {} -global_quality {} -qp {}",
+                settings.codec, quality, quality
+            );
+
+            params.push_str(" -compression_level 7");
+
+            (
+                hwaccel,
+                VideoCodecParams {
+                    codec: settings.codec.clone(),
+                    params,
+                    framerate,
+                },
+            )
+        }
+    }
+}
+
+#[derive(Clone)]
+struct VideoCodecParams {
+    codec: String,
+    params: String,
+    framerate: f32,
+}
+
+fn format_video_params(codec_params: &VideoCodecParams, width: u32, height: u32) -> String {
+    format!(
+        "{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={}'",
+        codec_params.params, width, height, codec_params.framerate
+    )
+}
+
 fn format_timestamp_vtt(seconds: f64) -> String {
     let hours = (seconds / 3600.0) as u32;
     let minutes = ((seconds % 3600.0) / 60.0) as u32;
@@ -826,7 +992,11 @@ fn format_timestamp_vtt(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, secs, millis)
 }
 
-fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
+fn transcode_video(
+    input_file: &str,
+    output_dir: &str,
+    config: &VideoConfig,
+) -> Result<(), ffmpeg_next::Error> {
     ffmpeg_next::init()?;
 
     let input_context = format::input(&input_file)?;
@@ -847,14 +1017,14 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         fr.numerator() as f32 / fr.denominator() as f32
     };
 
-    if fps > 120.0 {
-        framerate = 120.0;
+    if fps > config.fps_cap {
+        framerate = config.fps_cap;
     } else {
         framerate = fps;
     }
     let duration = input_context.duration() as f64 / ffmpeg_next::ffi::AV_TIME_BASE as f64; // Video duration in seconds
 
-    let mut audio_bitrate = 256; // 300 kbit
+    let mut audio_bitrate = config.audio_bitrate_base;
 
     // Calculate aspect ratio once to ensure all resolutions maintain it
     let aspect_ratio = original_width as f32 / original_height as f32;
@@ -862,56 +1032,50 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     let mut outputs = Vec::new();
     let mut width = original_width;
     let mut height = original_height;
-    let quality_steps;
-    if (width * height) >= 3686400 {
-        //2k video
-        quality_steps = 4;
-        audio_bitrate += 100;
+
+    // Determine number of quality steps based on resolution
+    let num_steps = if (width * height) >= config.threshold_2k_pixels {
+        config.max_resolution_steps
     } else {
-        quality_steps = 3;
-    }
+        config.max_resolution_steps - 1
+    };
 
-    for i in 0..quality_steps {
-        let label = match i {
-            0 => "original",
-            1 => "half_resolution",
-            2 => "quarter_resolution",
-            3 => "eighth_resolution",
-            _ => unreachable!(),
-        };
+    for i in 0..num_steps.min(config.quality_steps.len() as u32) {
+        let step = &config.quality_steps[i as usize];
 
-        // ICQ quality level
-        let quality = 30;
+        if num_steps >= config.max_resolution_steps {
+            audio_bitrate += config.audio_bitrate_2k_bonus;
+        }
 
-        outputs.push((
-            width,
-            height,
-            label,
-            quality,
-            audio_bitrate,
-        ));
+        outputs.push((width, height, step.label.clone(), audio_bitrate));
 
-        // Halve dimensions while maintaining aspect ratio (make dimensions even)
-        width = ((width as f32 / 2.0 / aspect_ratio).round() * aspect_ratio).round() as u32;
+        // Calculate next resolution by dividing by scale_divisor
+        let scale_factor = 1.0 / step.scale_divisor as f32;
+        width =
+            ((width as f32 * scale_factor / aspect_ratio).round() * aspect_ratio).round() as u32;
         height = (width as f32 / aspect_ratio).round() as u32;
         // Ensure dimensions are even (required for many codecs)
+        width = width.max(config.min_dimension);
+        height = height.max(config.min_dimension);
         width = (width / 2) * 2;
         height = (height / 2) * 2;
-        audio_bitrate /= 2;
+
+        audio_bitrate = (audio_bitrate / step.audio_bitrate_divisor).max(64);
     }
 
     let mut webm_files = Vec::new();
     let dash_output_dir = format!("{}/video", output_dir);
 
-    let mut cmd = format!(
-        "ffmpeg -y -hwaccel vaapi -vaapi_device /dev/dri/renderD128 -i {} ",
-        input_file
-    );
-    for (w, h, label, quality, audio_bitrate) in outputs {
+    // Build encoder-specific ffmpeg command
+    let (hwaccel_args, video_codec_params) = build_encoder_params(config, framerate);
+
+    let mut cmd = format!("ffmpeg -y {} -i {} ", hwaccel_args, input_file);
+    for (w, h, label, audio_bitrate) in &outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        cmd.push_str(format!(" -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={},unsharp=3:3:1.0:3:3:0.0,format=p010le,hwupload' -c:v av1_vaapi -global_quality {} -qp {} -compression_level 7 -lookahead 40 -c:a libopus -b:a {}k -f webm {} ",
-                w, h, framerate, quality, quality, audio_bitrate, output_file).as_str());
+        let video_params = format_video_params(&video_codec_params, *w, *h);
+        cmd.push_str(&format!(" -vf '{},unsharp=3:3:1.0:3:3:0.0,format=p010le,hwupload' {} -c:a libopus -b:a {}k -f webm {} ",
+                config.filters, video_params, audio_bitrate, output_file));
     }
 
     println!("Executing: {}", cmd);
