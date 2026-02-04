@@ -1097,7 +1097,7 @@ fn transcode_video(
         .join(" ");
 
     let mut maps: String = String::new();
-    for track_num in 0..quality_steps {
+    for track_num in 0..webm_files.len() {
         maps.push_str(format!(" -map {}:v -map {}:a ", track_num, track_num).as_str())
     }
 
