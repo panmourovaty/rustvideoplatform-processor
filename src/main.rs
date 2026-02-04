@@ -915,7 +915,7 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     for (w, h, label, bitrate, max_bitrate, min_bitrate, audio_bitrate) in outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
-        cmd.push_str(format!(" -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={},format=p010le,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
+        cmd.push_str(format!(" -vf 'scale={}:{}:force_original_aspect_ratio=decrease,fps={},unsharp=3:3:1.0:3:3:0.0,format=p010le,hwupload' -c:v av1_vaapi -b:v {} -maxrate {} -minrate {} -c:a libopus -b:a {}k -f webm {} ",
         w, h, framerate, bitrate, max_bitrate, min_bitrate, audio_bitrate, output_file).as_str());
     }
 
@@ -1129,35 +1129,6 @@ fn transcode_video(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
         vtt_cues.len(),
         num_sprite_files
     );
-
-    // Extract standalone audio track from video (similar to audio file processing)
-    // Check if audio codec is lossless or high quality
-    let audio_codec = get_audio_codec(input_file);
-    let audio_bitrate = get_audio_bitrate(input_file);
-
-    // Use higher bitrate for lossless/high-quality sources or if source bitrate is high
-    let opus_bitrate = if audio_codec == "flac"
-        || audio_codec == "wav"
-        || audio_codec == "pcm_s16le"
-        || audio_codec == "truehd"
-        || audio_bitrate > 300000
-    {
-        "300k"
-    } else {
-        "256k"
-    };
-
-    let audio_output_path = format!("{}/audio.ogg", output_dir);
-    let extract_audio_cmd = format!(
-        "ffmpeg -i {} -vn -c:a libopus -b:a {} -vbr on -application audio {} -y",
-        input_file, opus_bitrate, audio_output_path
-    );
-    println!("Executing: {}", extract_audio_cmd);
-    Command::new("sh")
-        .arg("-c")
-        .arg(&extract_audio_cmd)
-        .status()
-        .expect("Failed to extract audio from video");
 
     Ok(())
 }
