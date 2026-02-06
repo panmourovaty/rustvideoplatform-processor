@@ -892,77 +892,170 @@ enum EncoderType {
     Vaapi,
 }
 
-fn build_encoder_params(config: &VideoConfig, framerate: f32) -> (String, String, EncoderType) {
-    match config.encoder {
-        VideoEncoder::Nvenc => {
-            let settings = config.nvenc.as_ref().expect("NVENC settings required");
-            let hwaccel = "-hwaccel cuda -hwaccel_output_format cuda".to_string();
+#[derive(Debug, Clone)]
+struct HdrInfo {
+    is_hdr: bool,
+    color_transfer: Option<String>,
+    color_primaries: Option<String>,
+    color_space: Option<String>,
+}
 
-            let mut params = format!(
-                "-c:v {} -preset {} -tier {} -rc {} -cq {} -qmin {} -qmax {}",
-                settings.codec,
-                settings.preset,
-                settings.tier,
-                settings.rc,
-                settings.cq,
-                settings.cq + 10,
-                settings.cq.saturating_sub(10)
-            );
+fn detect_hdr(input_file: &str) -> HdrInfo {
+    let cmd = format!(
+        "ffprobe -v error -select_streams v:0 -show_entries stream=color_transfer,color_primaries,color_space -of default=noprint_wrappers=1 {}",
+        input_file
+    );
 
-            if let Some(la) = settings.lookahead {
-                params.push_str(&format!(" -lookahead {}", la));
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .output();
+
+    let mut hdr_info = HdrInfo {
+        is_hdr: false,
+        color_transfer: None,
+        color_primaries: None,
+        color_space: None,
+    };
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            for line in stdout.lines() {
+                if let Some((key, value)) = line.split_once('=') {
+                    let value = value.trim().to_string();
+                    match key.trim() {
+                        "color_transfer" => {
+                            hdr_info.color_transfer = Some(value.clone());
+                            // HDR transfers: smpte2084 (PQ), arib-std-b67 (HLG)
+                            if value == "smpte2084" || value == "arib-std-b67" {
+                                hdr_info.is_hdr = true;
+                            }
+                        }
+                        "color_primaries" => {
+                            hdr_info.color_primaries = Some(value.clone());
+                            // BT.2020 is commonly used with HDR
+                            if value == "bt2020" {
+                                hdr_info.is_hdr = true;
+                            }
+                        }
+                        "color_space" => {
+                            hdr_info.color_space = Some(value.clone());
+                        }
+                        _ => {}
+                    }
+                }
             }
-            if settings.temporal_aq.unwrap_or(false) {
-                params.push_str(" -temporal-aq 1");
-            }
-
-            (
-                hwaccel,
-                params,
-                EncoderType::Nvenc,
-            )
         }
-        VideoEncoder::Qsv => {
-            let settings = config.qsv.as_ref().expect("QSV settings required");
-            let hwaccel = "-hwaccel qsv -hwaccel_output_format qsv".to_string();
+        _ => {}
+    }
 
-            // Use simpler parameters for Intel Arc compatibility
-            let mut params = format!(
-                "-c:v {} -preset {}",
-                settings.codec, settings.preset
-            );
+    hdr_info
+}
 
-            // Only add global_quality if not using ICQ-like quality mode
-            if settings.global_quality > 0 {
-                params.push_str(&format!(" -global_quality:v {}", settings.global_quality));
+fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo) -> (String, String, String, EncoderType) {
+        // Build tonemapping filter if HDR is detected
+        let tonemap_filter = if hdr_info.is_hdr {
+            println!("HDR detected: transfer={:?}, primaries={:?}, space={:?}", 
+                hdr_info.color_transfer, hdr_info.color_primaries, hdr_info.color_space);
+            // Mobius tonemapping with 10-bit output
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=mobius,zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le".to_string()
+        } else {
+            String::new()
+        };
+
+        match config.encoder {
+            VideoEncoder::Nvenc => {
+                let settings = config.nvenc.as_ref().expect("NVENC settings required");
+            
+                // If HDR detected, we need to handle tonemapping
+                let hwaccel = if hdr_info.is_hdr {
+                    // For HDR, we process in software then upload to CUDA
+                    "-hwaccel cuda".to_string()
+                } else {
+                    "-hwaccel cuda -hwaccel_output_format cuda".to_string()
+                };
+
+                let mut params = format!(
+                    "-c:v {} -preset {} -tier {} -rc {} -cq {} -qmin {} -qmax {}",
+                    settings.codec,
+                    settings.preset,
+                    settings.tier,
+                    settings.rc,
+                    settings.cq,
+                    settings.cq + 10,
+                    settings.cq.saturating_sub(10)
+                );
+
+                if let Some(la) = settings.lookahead {
+                    params.push_str(&format!(" -lookahead {}", la));
+                }
+                if settings.temporal_aq.unwrap_or(false) {
+                    params.push_str(" -temporal-aq 1");
+                }
+
+                (
+                    hwaccel,
+                    params,
+                    tonemap_filter,
+                    EncoderType::Nvenc,
+                )
             }
+            VideoEncoder::Qsv => {
+                let settings = config.qsv.as_ref().expect("QSV settings required");
+            
+                let hwaccel = if hdr_info.is_hdr {
+                    // For HDR, we need software processing first
+                    String::new()
+                } else {
+                    "-hwaccel qsv -hwaccel_output_format qsv".to_string()
+                };
 
-            (
-                hwaccel,
-                params,
-                EncoderType::Qsv,
-            )
-        }
-        VideoEncoder::Vaapi => {
-            let settings = config.vaapi.as_ref().expect("VAAPI settings required");
-            let hwaccel = "-hwaccel vaapi -vaapi_device /dev/dri/renderD128".to_string();
+                // Use simpler parameters for Intel Arc compatibility
+                let mut params = format!(
+                    "-c:v {} -preset {}",
+                    settings.codec, settings.preset
+                );
 
-            let quality = settings.quality;
-            let mut params = format!(
-                "-c:v {} -global_quality {} -qp {}",
-                settings.codec, quality, quality
-            );
+                // Only add global_quality if not using ICQ-like quality mode
+                if settings.global_quality > 0 {
+                    params.push_str(&format!(" -global_quality:v {}", settings.global_quality));
+                }
 
-            params.push_str(" -compression_level 7");
+                (
+                    hwaccel,
+                    params,
+                    tonemap_filter,
+                    EncoderType::Qsv,
+                )
+            }
+            VideoEncoder::Vaapi => {
+                let settings = config.vaapi.as_ref().expect("VAAPI settings required");
+            
+                let hwaccel = if hdr_info.is_hdr {
+                    // For HDR, we need software processing first
+                    String::new()
+                } else {
+                    "-hwaccel vaapi -vaapi_device /dev/dri/renderD128".to_string()
+                };
 
-            (
-                hwaccel,
-                params,
-                EncoderType::Vaapi,
-            )
+                let quality = settings.quality;
+                let mut params = format!(
+                    "-c:v {} -global_quality {} -qp {}",
+                    settings.codec, quality, quality
+                );
+
+                params.push_str(" -compression_level 7");
+
+                (
+                    hwaccel,
+                    params,
+                    tonemap_filter,
+                    EncoderType::Vaapi,
+                )
+            }
         }
     }
-}
 
 
 
@@ -1052,8 +1145,11 @@ fn transcode_video(
     let mut webm_files = Vec::new();
     let dash_output_dir = format!("{}/video", output_dir);
 
+    // Detect HDR characteristics
+    let hdr_info = detect_hdr(input_file);
+
     // Build encoder-specific ffmpeg parameters
-    let (hwaccel_args, codec_params, encoder_type) = build_encoder_params(config, framerate);
+    let (hwaccel_args, codec_params, tonemap_filter, encoder_type) = build_encoder_params(config, framerate, &hdr_info);
 
     // Transcode each quality level separately (more reliable with hardware encoders)
     for (w, h, label, audio_bitrate) in &outputs {
@@ -1062,23 +1158,65 @@ fn transcode_video(
 
         let cmd = match encoder_type {
             EncoderType::Qsv => {
-                // QSV: hardware filter with format embedded, no fps filter, no pix_fmt
-                format!(
-                    "ffmpeg -y {} -i {} -vf 'scale_qsv=w={}:h={}:mode=hq:format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
-                    hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
-                )
+                if hdr_info.is_hdr {
+                    // HDR path: software tonemapping then QSV encode
+                    let filter_chain = if tonemap_filter.is_empty() {
+                        format!("scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", w, h)
+                    } else {
+                        format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
+                    };
+                    format!(
+                        "ffmpeg -y -i {} -vf '{}' -c:v {} -preset {} -c:a libopus -b:a {}k -f webm {}",
+                        input_file, filter_chain, 
+                        config.qsv.as_ref().unwrap().codec,
+                        config.qsv.as_ref().unwrap().preset,
+                        audio_bitrate, output_file
+                    )
+                } else {
+                    // QSV: hardware filter with format embedded, no fps filter, no pix_fmt
+                    format!(
+                        "ffmpeg -y {} -i {} -vf 'scale_qsv=w={}:h={}:mode=hq:format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                        hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
+                    )
+                }
             }
             EncoderType::Nvenc => {
-                format!(
-                    "ffmpeg -y {} -i {} -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -c:a libopus -b:a {}k -f webm {}",
-                    hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
-                )
+                if hdr_info.is_hdr {
+                    // HDR path: software tonemapping then NVENC encode
+                    let filter_chain = if tonemap_filter.is_empty() {
+                        format!("scale={}:{}:force_original_aspect_ratio=decrease:finterp=true,format=yuv420p10le", w, h)
+                    } else {
+                        format!("{},scale={}:{}:force_original_aspect_ratio=decrease:finterp=true", tonemap_filter, w, h)
+                    };
+                    format!(
+                        "ffmpeg -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i {} -vf '{}' {} -c:a libopus -b:a {}k -f webm {}",
+                        input_file, filter_chain, codec_params, audio_bitrate, output_file
+                    )
+                } else {
+                    format!(
+                        "ffmpeg -y {} -i {} -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -c:a libopus -b:a {}k -f webm {}",
+                        hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
+                    )
+                }
             }
             EncoderType::Vaapi => {
-                format!(
-                    "ffmpeg -y {} -i {} -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
-                    hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
-                )
+                if hdr_info.is_hdr {
+                    // HDR path: software tonemapping then VAAPI encode
+                    let filter_chain = if tonemap_filter.is_empty() {
+                        format!("scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", w, h)
+                    } else {
+                        format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
+                    };
+                    format!(
+                        "ffmpeg -y -vaapi_device /dev/dri/renderD128 -i {} -vf '{}' {} -c:a libopus -b:a {}k -f webm {}",
+                        input_file, filter_chain, codec_params, audio_bitrate, output_file
+                    )
+                } else {
+                    format!(
+                        "ffmpeg -y {} -i {} -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                        hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
+                    )
+                }
             }
         };
 
