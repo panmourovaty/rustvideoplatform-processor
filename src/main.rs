@@ -1158,9 +1158,11 @@ fn transcode_video(
 
         let cmd = match encoder_type {
             EncoderType::Qsv => {
+                let hwaccel_args = "-hwaccel qsv -hwaccel_output_format qsv";
+
                 if hdr_info.is_hdr {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:tonemap=hable:format=p010le' -c:v {} -preset {} -pix_fmt p010le -c:a libopus -b:a {}k -ac 2 -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' -c:v {} -preset {} -pix_fmt p010le -c:a libopus -b:a {}k -ac 2 -f webm {}",
                         hwaccel_args,
                         input_file,
                         w, h,
