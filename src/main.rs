@@ -53,9 +53,7 @@ struct QsvSettings {
     preset: String,
     global_quality: u32,
     #[serde(default)]
-    lookahead: Option<u32>,
-    #[serde(default)]
-    look_ahead_depth: Option<u32>,
+    look_ahead_depth: u32,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -1205,8 +1203,16 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
                     settings.codec, settings.preset
                 );
 
-                // Only add global_quality if not using ICQ-like quality mode
+                // Always enable QSV lookahead
+                params.push_str(" -look_ahead 1");
+                // Apply explicit lookahead depth when configured
+                if settings.look_ahead_depth > 0 {
+                    params.push_str(&format!(" -look_ahead_depth {}", settings.look_ahead_depth));
+                }
+
+                // If a quality value is provided, use LA_ICQ rate control on QSV.
                 if settings.global_quality > 0 {
+                    params.push_str(" -rc:v LA_ICQ");
                     params.push_str(&format!(" -global_quality:v {}", settings.global_quality));
                 }
 
@@ -1350,12 +1356,11 @@ fn transcode_video(
 
                 if hdr_info.is_hdr {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' -c:v {} -preset {} -pix_fmt p010le -c:a libopus -b:a {}k -ac 2 -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' {} -pix_fmt p010le -c:a libopus -b:a {}k -ac 2 -f webm {}",
                         hwaccel_args,
                         input_file,
                         w, h,
-                        config.qsv.as_ref().unwrap().codec,
-                        config.qsv.as_ref().unwrap().preset,
+                        codec_params,
                         audio_bitrate,
                         output_file
                     )
