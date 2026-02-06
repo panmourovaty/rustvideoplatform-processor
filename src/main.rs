@@ -1244,7 +1244,9 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
 
                 // If a quality value is provided, use LA_ICQ rate control on QSV.
                 if settings.global_quality > 0 {
+                    // QSV rate control is configured via rc_mode (not rc / rc:v)
                     params.push_str(" -rc_mode LA_ICQ");
+                    // global_quality is the QSV quality knob used by LA_ICQ/ICQ-style modes
                     params.push_str(&format!(" -global_quality {}", settings.global_quality));
                 }
 
@@ -1388,7 +1390,7 @@ fn transcode_video(
 
                 if hdr_info.is_hdr {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' {} -pix_fmt p010le -c:a libopus -b:a {}k -ac 2 -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' {} -pix_fmt p010le -c:a libopus -b:a {}k -vbr on -ac 2 -f webm {}",
                         hwaccel_args,
                         input_file,
                         w, h,
@@ -1398,7 +1400,7 @@ fn transcode_video(
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:format=p010le' {} -pix_fmt p010le -c:a libopus -b:a {}k -ac 2 -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:format=p010le' {} -pix_fmt p010le -c:a libopus -b:a {}k -vbr on -ac 2 -f webm {}",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
