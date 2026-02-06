@@ -600,8 +600,10 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
         .arg(input_file);
 
     for (stream_idx, _final_name, output_file, _language, _title) in &outputs {
+        // `stream_idx` here is the absolute input stream index (as in `0:3`, `0:4`, ...),
+        // not the Nth subtitle stream. So we must map using `0:{idx}`, not `0:s:{n}`.
         cmd.arg("-map")
-            .arg(format!("0:s:{}", stream_idx))
+            .arg(format!("0:{}", stream_idx))
             .arg("-c:s")
             .arg("webvtt")
             .arg(output_file);
