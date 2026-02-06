@@ -1237,17 +1237,12 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
                     settings.codec, settings.preset
                 );
 
-                // Always enable QSV lookahead
-                params.push_str(" -look_ahead 1");
-                // Apply explicit lookahead depth when configured
                 if settings.look_ahead_depth > 0 {
                     params.push_str(&format!(" -look_ahead_depth {}", settings.look_ahead_depth));
                 }
 
                 // If a quality value is provided, use la_icq rate control on QSV.
                 if settings.global_quality > 0 {
-                    // QSV rate control is configured via rc_mode (not rc / rc:v)
-                    params.push_str(" -rc_mode la_icq");
                     // global_quality is the QSV quality knob used by la_icq/ICQ-style modes
                     params.push_str(&format!(" -global_quality {}", settings.global_quality));
                 }
