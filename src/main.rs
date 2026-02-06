@@ -958,8 +958,8 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
         let tonemap_filter = if hdr_info.is_hdr {
             println!("HDR detected: transfer={:?}, primaries={:?}, space={:?}",
                 hdr_info.color_transfer, hdr_info.color_primaries, hdr_info.color_space);
-            // Mobius tonemapping with 10-bit output
-            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=mobius,zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le".to_string()
+            // hable tonemapping with 10-bit output
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable,zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le".to_string()
         } else {
             String::new()
         };
@@ -1159,23 +1159,19 @@ fn transcode_video(
         let cmd = match encoder_type {
             EncoderType::Qsv => {
                 if hdr_info.is_hdr {
-                    // HDR path: software tonemapping then QSV encode
-                    let filter_chain = if tonemap_filter.is_empty() {
-                        format!("scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", w, h)
-                    } else {
-                        format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
-                    };
                     format!(
-                        "ffmpeg -y -i {} -vf '{}' -c:v {} -preset {} -c:a libopus -b:a {}k -ac 2 -f webm {}",
-                        input_file, filter_chain,
+                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:tonemap=hable:format=p010le' -c:v {} -preset {} -pix_fmt p010le -c:a libopus -b:a {}k -ac 2 -f webm {}",
+                        hwaccel_args,
+                        input_file,
+                        w, h,
                         config.qsv.as_ref().unwrap().codec,
                         config.qsv.as_ref().unwrap().preset,
-                        audio_bitrate, output_file
+                        audio_bitrate,
+                        output_file
                     )
                 } else {
-                    // QSV: hardware filter with format embedded, no fps filter, no pix_fmt
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'scale_qsv=w={}:h={}:mode=hq:format=p010le' {} -c:a libopus -b:a {}k -ac 2 -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:format=p010le' {} -pix_fmt p010le -c:a libopus -b:a {}k -ac 2 -f webm {}",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
