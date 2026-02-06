@@ -956,7 +956,7 @@ fn detect_hdr(input_file: &str) -> HdrInfo {
 fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo) -> (String, String, String, EncoderType) {
         // Build tonemapping filter if HDR is detected
         let tonemap_filter = if hdr_info.is_hdr {
-            println!("HDR detected: transfer={:?}, primaries={:?}, space={:?}", 
+            println!("HDR detected: transfer={:?}, primaries={:?}, space={:?}",
                 hdr_info.color_transfer, hdr_info.color_primaries, hdr_info.color_space);
             // Mobius tonemapping with 10-bit output
             "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=mobius,zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le".to_string()
@@ -967,7 +967,7 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
         match config.encoder {
             VideoEncoder::Nvenc => {
                 let settings = config.nvenc.as_ref().expect("NVENC settings required");
-            
+
                 // If HDR detected, we need to handle tonemapping
                 let hwaccel = if hdr_info.is_hdr {
                     // For HDR, we process in software then upload to CUDA
@@ -1003,7 +1003,7 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
             }
             VideoEncoder::Qsv => {
                 let settings = config.qsv.as_ref().expect("QSV settings required");
-            
+
                 let hwaccel = if hdr_info.is_hdr {
                     // For HDR, we need software processing first
                     String::new()
@@ -1031,7 +1031,7 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
             }
             VideoEncoder::Vaapi => {
                 let settings = config.vaapi.as_ref().expect("VAAPI settings required");
-            
+
                 let hwaccel = if hdr_info.is_hdr {
                     // For HDR, we need software processing first
                     String::new()
@@ -1166,8 +1166,8 @@ fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -y -i {} -vf '{}' -c:v {} -preset {} -c:a libopus -b:a {}k -f webm {}",
-                        input_file, filter_chain, 
+                        "ffmpeg -y -i {} -vf '{}' -c:v {} -preset {} -c:a libopus -b:a {}k -ac 2 -f webm {}",
+                        input_file, filter_chain,
                         config.qsv.as_ref().unwrap().codec,
                         config.qsv.as_ref().unwrap().preset,
                         audio_bitrate, output_file
@@ -1175,7 +1175,7 @@ fn transcode_video(
                 } else {
                     // QSV: hardware filter with format embedded, no fps filter, no pix_fmt
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'scale_qsv=w={}:h={}:mode=hq:format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'scale_qsv=w={}:h={}:mode=hq:format=p010le' {} -c:a libopus -b:a {}k -ac 2 -f webm {}",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
@@ -1189,12 +1189,12 @@ fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease:finterp=true", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i {} -vf '{}' {} -c:a libopus -b:a {}k -f webm {}",
+                        "ffmpeg -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i {} -vf '{}' {} -c:a libopus -b:a {}k -ac 2 -f webm {}",
                         input_file, filter_chain, codec_params, audio_bitrate, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -c:a libopus -b:a {}k -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -c:a libopus -b:a {}k -ac 2 -f webm {}",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
@@ -1208,12 +1208,12 @@ fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -y -vaapi_device /dev/dri/renderD128 -i {} -vf '{}' {} -c:a libopus -b:a {}k -f webm {}",
+                        "ffmpeg -y -vaapi_device /dev/dri/renderD128 -i {} -vf '{}' {} -c:a libopus -b:a {}k -ac 2 -f webm {}",
                         input_file, filter_chain, codec_params, audio_bitrate, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -c:a libopus -b:a {}k -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -c:a libopus -b:a {}k -ac 2 -f webm {}",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
