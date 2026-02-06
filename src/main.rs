@@ -1244,11 +1244,11 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
                     params.push_str(&format!(" -look_ahead_depth {}", settings.look_ahead_depth));
                 }
 
-                // If a quality value is provided, use LA_ICQ rate control on QSV.
+                // If a quality value is provided, use la_icq rate control on QSV.
                 if settings.global_quality > 0 {
                     // QSV rate control is configured via rc_mode (not rc / rc:v)
-                    params.push_str(" -rc_mode LA_ICQ");
-                    // global_quality is the QSV quality knob used by LA_ICQ/ICQ-style modes
+                    params.push_str(" -rc_mode la_icq");
+                    // global_quality is the QSV quality knob used by la_icq/ICQ-style modes
                     params.push_str(&format!(" -global_quality {}", settings.global_quality));
                 }
 
@@ -1403,7 +1403,12 @@ fn transcode_video(
                 } else {
                     format!(
                         "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:format=p010le' {} -pix_fmt p010le -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
-                        hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
+                        hwaccel_args,
+                        input_file,
+                        w, h,
+                        codec_params,
+                        audio_bitrate,
+                        output_file
                     )
                 }
             }
