@@ -1244,11 +1244,11 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
                     params.push_str(&format!(" -look_ahead_depth {}", settings.look_ahead_depth));
                 }
 
-                // If a quality value is provided, use la_icq rate control on QSV.
+                // If a quality value is provided, use LA_ICQ rate control on QSV.
                 if settings.global_quality > 0 {
                     // QSV rate control is configured via rc_mode (not rc / rc:v)
-                    params.push_str(" -rc_mode la_icq");
-                    // global_quality is the QSV quality knob used by la_icq/ICQ-style modes
+                    params.push_str(" -rc_mode LA_ICQ");
+                    // global_quality is the QSV quality knob used by LA_ICQ/ICQ-style modes
                     params.push_str(&format!(" -global_quality {}", settings.global_quality));
                 }
 
@@ -1392,7 +1392,7 @@ fn transcode_video(
 
                 if hdr_info.is_hdr {
                     format!(
-                        "ffmpeg -y {} -i {} -map 0:v:0 -map 0:a:0 -sn -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' {} -pix_fmt p010le -c:a:0 libopus -b:a:0 {}k -vbr:a:0 constrained -ac:a:0 2 -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' {} -pix_fmt p010le -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
                         hwaccel_args,
                         input_file,
                         w, h,
@@ -1402,7 +1402,7 @@ fn transcode_video(
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} -map 0:v:0 -map 0:a:0 -sn -vf 'vpp_qsv=w={}:h={}:format=p010le' {} -pix_fmt p010le -c:a:0 libopus -b:a:0 {}k -vbr:a:0 constrained -ac:a:0 2 -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:format=p010le' {} -pix_fmt p010le -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
@@ -1416,12 +1416,12 @@ fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease:finterp=true", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i {} -map 0:v:0 -map 0:a:0 -sn -vf '{}' {} -c:a:0 libopus -b:a:0 {}k -vbr:a:0 constrained -ac:a:0 2 -f webm {}",
+                        "ffmpeg -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i {} -vf '{}' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
                         input_file, filter_chain, codec_params, audio_bitrate, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} -map 0:v:0 -map 0:a:0 -sn -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -c:a:0 libopus -b:a:0 {}k -vbr:a:0 constrained -ac:a:0 2 -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
@@ -1435,12 +1435,12 @@ fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -y -vaapi_device /dev/dri/renderD128 -i {} -map 0:v:0 -map 0:a:0 -sn -vf '{}' {} -c:a:0 libopus -b:a:0 {}k -vbr:a:0 constrained -ac:a:0 2 -f webm {}",
+                        "ffmpeg -y -vaapi_device /dev/dri/renderD128 -i {} -vf '{}' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
                         input_file, filter_chain, codec_params, audio_bitrate, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} -map 0:v:0 -map 0:a:0 -sn -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -c:a:0 libopus -b:a:0 {}k -vbr:a:0 constrained -ac:a:0 2 -f webm {}",
+                        "ffmpeg -y {} -i {} -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
