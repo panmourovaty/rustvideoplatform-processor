@@ -1233,18 +1233,18 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
 
                 // Use simpler parameters for Intel Arc compatibility
                 let mut params = format!(
-                    "-c:v {} -preset {}",
+                    "-c:v {} -preset:v {}",
                     settings.codec, settings.preset
                 );
 
                 if settings.look_ahead_depth > 0 {
-                    params.push_str(&format!(" -extbrc 1 -look_ahead_depth {}", settings.look_ahead_depth));
+                    params.push_str(&format!(" -extbrc:v 1 -look_ahead_depth:v {}", settings.look_ahead_depth));
                 }
 
                 // If a quality value is provided, use la_icq rate control on QSV.
                 if settings.global_quality > 0 {
                     // global_quality is the QSV quality knob used by la_icq/ICQ-style modes
-                    params.push_str(&format!(" -preset veryslow -global_quality {}", settings.global_quality));
+                    params.push_str(&format!(" -global_quality:v {}", settings.global_quality));
                 }
 
                 (
@@ -1340,6 +1340,23 @@ fn transcode_video(
         config.max_resolution_steps - 1
     };
 
+    let mut extra_outputs = Vec::new();
+    let extra_scales: Vec<(f32, &str)> = vec![
+        (0.5, "half_resolution"),
+    ];
+
+    for (scale, label) in extra_scales {
+        let mut w = (original_width as f32 * scale).round() as u32;
+        let mut h = (original_height as f32 * scale).round() as u32;
+
+        w = (w / 2) * 2;
+        h = (h / 2) * 2;
+
+        if w >= config.min_dimension && h >= config.min_dimension {
+            extra_outputs.push((w, h, label.to_string(), audio_bitrate));
+        }
+    }
+
     for i in 0..num_steps.min(config.quality_steps.len() as u32) {
         let step = &config.quality_steps[i as usize];
 
@@ -1363,6 +1380,12 @@ fn transcode_video(
         height = (height / 2) * 2;
 
         audio_bitrate = (audio_bitrate / step.audio_bitrate_divisor).max(64);
+    }
+
+    for (w, h, label, abr) in extra_outputs {
+        if !outputs.iter().any(|(ow, oh, _, _)| *ow == w && *oh == h) {
+            outputs.push((w, h, label, abr));
+        }
     }
 
     println!("Generated {} quality outputs: {:?}", outputs.len(), outputs.iter().map(|(_, _, label, _)| label.clone()).collect::<Vec<_>>());
