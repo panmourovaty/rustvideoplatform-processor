@@ -13,6 +13,24 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::process::Command;
 
+#[derive(Deserialize, Debug)]
+struct FfprobeOutput {
+    streams: Option<Vec<FfprobeStream>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FfprobeStream {
+    index: Option<u32>,
+    codec_name: Option<String>,
+    tags: Option<FfprobeTags>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FfprobeTags {
+    language: Option<String>,
+    title: Option<String>,
+}
+
 #[derive(Deserialize, Clone)]
 struct Config {
     dbconnection: String,
@@ -461,102 +479,86 @@ async fn process_audio(concept_id: String, pool: PgPool) {
     }
 }
 
-fn count_subtitle_streams(input_file: &str) -> u32 {
-    let probe_cmd = format!(
-        "ffprobe -v error -select_streams s -show_entries stream=index -of default=noprint_wrappers=1:nokey=1 {}",
-        input_file
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&probe_cmd)
-        .output()
-        .expect("Failed to probe subtitle streams");
+fn probe_subtitle_streams(input_file: &str) -> Vec<(u32, String, String, String)> {
+    // Returns Vec of (stream_index, language, title, codec)
+    //
+    // Single ffprobe call:
+    // ffprobe -v error -select_streams s -show_entries stream=index,codec_name:stream_tags=language,title -of json <input>
+    let mut cmd = Command::new("ffprobe");
+    cmd.arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("s")
+        .arg("-show_entries")
+        .arg("stream=index,codec_name:stream_tags=language,title")
+        .arg("-of")
+        .arg("json")
+        .arg(input_file);
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
 
     if !output.status.success() {
-        return 0;
+        return Vec::new();
     }
 
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let count = output_str.lines().filter(|line| !line.trim().is_empty()).count();
-    count as u32
-}
-
-fn get_subtitle_info(input_file: &str, stream_index: u32) -> (String, String, String) {
-    // Get language, title, and codec for the subtitle stream
-    // Returns: (language, title, codec)
-
-    // Get language tag
-    let lang_cmd = format!(
-        "ffprobe -v error -select_streams s:{} -show_entries stream_tags=language -of default=noprint_wrappers=1:nokey=1 {}",
-        stream_index,
-        input_file
-    );
-
-    let language = match Command::new("sh").arg("-c").arg(&lang_cmd).output() {
-        Ok(result) if result.status.success() => {
-            String::from_utf8_lossy(&result.stdout).trim().to_string()
-        }
-        _ => String::new(),
+    let parsed: FfprobeOutput = match serde_json::from_slice(&output.stdout) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
     };
 
-    // Get title tag
-    let title_cmd = format!(
-        "ffprobe -v error -select_streams s:{} -show_entries stream_tags=title -of default=noprint_wrappers=1:nokey=1 {}",
-        stream_index,
-        input_file
-    );
-
-    let title = match Command::new("sh").arg("-c").arg(&title_cmd).output() {
-        Ok(result) if result.status.success() => {
-            String::from_utf8_lossy(&result.stdout).trim().to_string()
-        }
-        _ => String::new(),
+    let mut result = Vec::new();
+    let streams = match parsed.streams {
+        Some(s) => s,
+        None => return result,
     };
 
-    // Get codec
-    let codec_cmd = format!(
-        "ffprobe -v error -select_streams s:{} -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 {}",
-        stream_index,
-        input_file
-    );
+    for s in streams {
+        let idx = match s.index {
+            Some(i) => i,
+            None => continue,
+        };
+        let codec = s.codec_name.unwrap_or_else(|| "unknown".to_string());
+        let (language, title) = match s.tags {
+            Some(t) => (
+                t.language.unwrap_or_default(),
+                t.title.unwrap_or_default(),
+            ),
+            None => (String::new(), String::new()),
+        };
 
-    let codec = match Command::new("sh").arg("-c").arg(&codec_cmd).output() {
-        Ok(result) if result.status.success() => {
-            String::from_utf8_lossy(&result.stdout).trim().to_string()
-        }
-        _ => String::from("unknown"),
-    };
+        result.push((idx, language, title, codec));
+    }
 
-    (language, title, codec)
+    result
 }
 
 fn sanitize_filename(name: &str) -> String {
-    // Remove or replace characters that are not safe for filenames
     name.chars()
-        .map(|c| match c {
-            ' ' | '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
-        })
-        .collect::<String>()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
-    let subtitle_count = count_subtitle_streams(input_file);
-    if subtitle_count == 0 {
+    let subtitle_streams = probe_subtitle_streams(input_file);
+    if subtitle_streams.is_empty() {
         return Vec::new();
     }
 
     // Create captions directory
     let captions_dir = format!("{}/captions", output_dir);
-    fs::create_dir_all(&captions_dir)
-        .expect("Failed to create captions directory");
+    fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
 
-    let mut saved_files = Vec::new();
+    let mut saved_files: Vec<String> = Vec::new();
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for stream_idx in 0..subtitle_count {
-        let (language, title, codec) = get_subtitle_info(input_file, stream_idx);
+    // Precompute per-stream output file paths and names (so we can build a single ffmpeg invocation)
+    let mut outputs: Vec<(u32, String, String, String, String)> = Vec::new();
+    // (subtitle_stream_index, final_name, output_file, language, title)
 
+    for (stream_idx, language, title, codec) in subtitle_streams {
         // Determine the best filename for this subtitle
         let base_name = if !language.is_empty() {
             sanitize_filename(&language)
@@ -577,47 +579,73 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
 
         let output_file = format!("{}/{}.vtt", captions_dir, final_name);
 
-        // Try to extract subtitle stream to VTT format
-        let extract_cmd = format!(
-            "ffmpeg -i {} -map 0:s:{} -c:s webvtt {} -y",
-            input_file, stream_idx, output_file
-        );
-
-        println!("Extracting subtitle stream {} (language: '{}', title: '{}', codec: {}) to VTT as '{}'",
+        println!(
+            "Preparing subtitle stream {} (language: '{}', title: '{}', codec: {}) to VTT as '{}'",
             stream_idx,
             if language.is_empty() { "unknown" } else { &language },
             if title.is_empty() { "none" } else { &title },
             codec,
             final_name
         );
-        let result = Command::new("sh")
-            .arg("-c")
-            .arg(&extract_cmd)
-            .output();
 
-        match result {
-            Ok(output) => {
-                if output.status.success() {
-                    // Check if file was created and has content
-                    if let Ok(metadata) = fs::metadata(&output_file) {
-                        if metadata.len() > 0 {
-                            saved_files.push(final_name.clone());
-                            println!("Successfully extracted subtitle stream {} to {}", stream_idx, output_file);
-                        } else {
-                            // Remove empty file
+        outputs.push((stream_idx, final_name, output_file, language, title));
+    }
+
+    // Build a single ffmpeg invocation that extracts all subtitle streams at once.
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-nostdin")
+        .arg("-v")
+        .arg("error")
+        .arg("-i")
+        .arg(input_file);
+
+    for (stream_idx, _final_name, output_file, _language, _title) in &outputs {
+        cmd.arg("-map")
+            .arg(format!("0:s:{}", stream_idx))
+            .arg("-c:s")
+            .arg("webvtt")
+            .arg(output_file);
+    }
+
+    cmd.arg("-y");
+
+    println!(
+        "Extracting {} subtitle stream(s) to VTT in a single ffmpeg invocation",
+        outputs.len()
+    );
+
+    let result = cmd.output();
+
+    match result {
+        Ok(output) => {
+            if output.status.success() {
+                // Validate each expected output file and keep only non-empty ones
+                for (_stream_idx, final_name, output_file, _language, _title) in outputs {
+                    match fs::metadata(&output_file) {
+                        Ok(metadata) if metadata.len() > 0 => {
+                            saved_files.push(final_name);
+                        }
+                        _ => {
+                            // Remove empty or missing file (best effort)
                             let _ = fs::remove_file(&output_file);
-                            println!("Subtitle stream {} produced empty output, skipping", stream_idx);
                         }
                     }
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    println!("Failed to extract subtitle stream {}: {}", stream_idx, stderr);
-                    // Clean up any partial file
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                println!("Failed to extract subtitles to VTT: {}", stderr);
+
+                // Clean up any partial files (best effort)
+                for (_stream_idx, _final_name, output_file, _language, _title) in outputs {
                     let _ = fs::remove_file(&output_file);
                 }
             }
-            Err(e) => {
-                println!("Error executing ffmpeg for subtitle stream {}: {}", stream_idx, e);
+        }
+        Err(e) => {
+            println!("Error executing ffmpeg for subtitle extraction: {}", e);
+
+            // Clean up any partial files (best effort)
+            for (_stream_idx, _final_name, output_file, _language, _title) in outputs {
                 let _ = fs::remove_file(&output_file);
             }
         }
@@ -630,7 +658,11 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
         if let Err(e) = fs::write(&list_file_path, content) {
             println!("Failed to create list.txt: {}", e);
         } else {
-            println!("Created list.txt with {} subtitle entries: {:?}", saved_files.len(), saved_files);
+            println!(
+                "Created list.txt with {} subtitle entries: {:?}",
+                saved_files.len(),
+                saved_files
+            );
         }
     }
 
