@@ -1212,8 +1212,8 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
 
                 // If a quality value is provided, use LA_ICQ rate control on QSV.
                 if settings.global_quality > 0 {
-                    params.push_str(" -rc:v LA_ICQ");
-                    params.push_str(&format!(" -global_quality:v {}", settings.global_quality));
+                    params.push_str(" -rc_mode LA_ICQ");
+                    params.push_str(&format!(" -global_quality {}", settings.global_quality));
                 }
 
                 (
