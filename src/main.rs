@@ -1547,7 +1547,7 @@ fn transcode_video(
     // smazat mezividea
     println!("Remove WebM files...");
     for file in webm_files {
-        fs::remove_file(file).expect("Failed to delete WebM file");
+       // fs::remove_file(file).expect("Failed to delete WebM file");
     }
 
     // generovat thumbnails
