@@ -1228,7 +1228,7 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
                     // For HDR, we need software processing first
                     String::new()
                 } else {
-                    "-hwaccel qsv -hwaccel_output_format qsv".to_string()
+                    "-hwaccel qsv -hwaccel_output_format qsv -c:v av1_qsv".to_string()
                 };
 
                 // Use simpler parameters for Intel Arc compatibility
@@ -1238,13 +1238,13 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
                 );
 
                 if settings.look_ahead_depth > 0 {
-                    params.push_str(&format!(" -look_ahead_depth {}", settings.look_ahead_depth));
+                    params.push_str(&format!(" -extbrc 1 -look_ahead_depth {}", settings.look_ahead_depth));
                 }
 
                 // If a quality value is provided, use la_icq rate control on QSV.
                 if settings.global_quality > 0 {
                     // global_quality is the QSV quality knob used by la_icq/ICQ-style modes
-                    params.push_str(&format!(" -global_quality {}", settings.global_quality));
+                    params.push_str(&format!(" -preset veryslow -global_quality {}", settings.global_quality));
                 }
 
                 (
@@ -1384,15 +1384,6 @@ fn transcode_video(
         let cmd = match encoder_type {
             EncoderType::Qsv => {
                 let hwaccel_args = "-hwaccel qsv -hwaccel_output_format qsv";
-
-                let la_depth = config.qsv.unwrap().look_ahead_depth;
-                let gq       = config.qsv.unwrap().global_quality;
-                let preset   = "veryslow";
-
-                let codec_params = format!(
-                    "-c:v av1_qsv -preset {} -extbrc 1 -look_ahead_depth {} -global_quality:v {}",
-                    preset, la_depth, gq
-                );
 
                 if hdr_info.is_hdr {
                     format!(
