@@ -1390,15 +1390,22 @@ fn transcode_video(
             EncoderType::Qsv => {
                 let hwaccel_args = "-hwaccel qsv -hwaccel_output_format qsv";
 
-                let codec_params = codec_params
-                    .replace("-global_quality ", "-global_quality:v ")
-                    .replace("-rc_mode ", "-rc_mode:v ")
-                    .replace("-look_ahead ", "-look_ahead:v ")
-                    .replace("-look_ahead_depth ", "-look_ahead_depth:v ");
+                let la_depth = config.qsv.look_ahead_depth;
+                let gq       = config.qsv.global_quality;
+                let preset   = "veryslow";
+
+                let codec_params = format!(
+                    "-c:v av1_qsv -preset {} -extbrc 1 -look_ahead_depth {} -global_quality:v {}",
+                    preset, la_depth, gq
+                );
 
                 if hdr_info.is_hdr {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' {} -pix_fmt p010le -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
+                        "ffmpeg -y {} -i {} \
+                         -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' \
+                         {} -pix_fmt p010le \
+                         -c:a libopus -b:a {}k -vbr constrained -ac 2 \
+                         -f webm {}",
                         hwaccel_args,
                         input_file,
                         w, h,
@@ -1408,7 +1415,11 @@ fn transcode_video(
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'vpp_qsv=w={}:h={}:format=p010le' {} -pix_fmt p010le -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
+                        "ffmpeg -y {} -i {} \
+                         -vf 'vpp_qsv=w={}:h={}:format=p010le' \
+                         {} -pix_fmt p010le \
+                         -c:a libopus -b:a {}k -vbr constrained -ac 2 \
+                         -f webm {}",
                         hwaccel_args,
                         input_file,
                         w, h,
