@@ -396,6 +396,12 @@ async fn process(pool: PgPool, video_config: VideoConfig) {
 async fn process_video(concept_id: String, pool: PgPool, video_config: VideoConfig) {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .expect("Failed to create concept processing result directory");
+
+    // Extract subtitles before transcoding
+    let input_file = format!("upload/{}", concept_id);
+    let output_dir = format!("upload/{}_processing", concept_id);
+    extract_subtitles_to_vtt(&input_file, &output_dir);
+
     let transcode_result = transcode_video(
         format!("upload/{}", concept_id).as_str(),
         format!("upload/{}_processing", concept_id).as_str(),
@@ -435,6 +441,12 @@ async fn process_picture(concept_id: String, pool: PgPool) {
 async fn process_audio(concept_id: String, pool: PgPool) {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .expect("Failed to create concept processing result directory");
+
+    // Extract subtitles before transcoding (some audio formats can contain lyrics/subtitles)
+    let input_file = format!("upload/{}", concept_id);
+    let output_dir = format!("upload/{}_processing", concept_id);
+    extract_subtitles_to_vtt(&input_file, &output_dir);
+
     let transcode_result = transcode_audio(
         format!("upload/{}", concept_id).as_str(),
         format!("upload/{}_processing", concept_id).as_str(),
@@ -449,6 +461,117 @@ async fn process_audio(concept_id: String, pool: PgPool) {
         .expect("Database error");
         let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
     }
+}
+
+fn count_subtitle_streams(input_file: &str) -> u32 {
+    let probe_cmd = format!(
+        "ffprobe -v error -select_streams s -show_entries stream=index -of default=noprint_wrappers=1:nokey=1 {}",
+        input_file
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&probe_cmd)
+        .output()
+        .expect("Failed to probe subtitle streams");
+
+    if !output.status.success() {
+        return 0;
+    }
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let count = output_str.lines().filter(|line| !line.trim().is_empty()).count();
+    count as u32
+}
+
+fn get_subtitle_codec(input_file: &str, stream_index: u32) -> String {
+    let probe_cmd = format!(
+        "ffprobe -v error -select_streams s:{} -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 {}",
+        stream_index,
+        input_file
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&probe_cmd)
+        .output()
+        .expect("Failed to probe subtitle codec");
+
+    if !output.status.success() {
+        return String::from("unknown");
+    }
+
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
+    let subtitle_count = count_subtitle_streams(input_file);
+    if subtitle_count == 0 {
+        return Vec::new();
+    }
+
+    // Create captions directory
+    let captions_dir = format!("{}/captions", output_dir);
+    fs::create_dir_all(&captions_dir)
+        .expect("Failed to create captions directory");
+
+    let mut saved_files = Vec::new();
+
+    for stream_idx in 0..subtitle_count {
+        let codec = get_subtitle_codec(input_file, stream_idx);
+        let output_file = format!("{}/subtitle_{}.vtt", captions_dir, stream_idx);
+
+        // Try to extract subtitle stream to VTT format
+        // ffmpeg can convert most subtitle formats to vtt
+        let extract_cmd = format!(
+            "ffmpeg -i {} -map 0:s:{} -c:s webvtt {} -y",
+            input_file, stream_idx, output_file
+        );
+
+        println!("Extracting subtitle stream {} (codec: {}) to VTT", stream_idx, codec);
+        let result = Command::new("sh")
+            .arg("-c")
+            .arg(&extract_cmd)
+            .output();
+
+        match result {
+            Ok(output) => {
+                if output.status.success() {
+                    // Check if file was created and has content
+                    if let Ok(metadata) = fs::metadata(&output_file) {
+                        if metadata.len() > 0 {
+                            saved_files.push(format!("subtitle_{}", stream_idx));
+                            println!("Successfully extracted subtitle stream {} to {}", stream_idx, output_file);
+                        } else {
+                            // Remove empty file
+                            let _ = fs::remove_file(&output_file);
+                            println!("Subtitle stream {} produced empty output, skipping", stream_idx);
+                        }
+                    }
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("Failed to extract subtitle stream {}: {}", stream_idx, stderr);
+                    // Clean up any partial file
+                    let _ = fs::remove_file(&output_file);
+                }
+            }
+            Err(e) => {
+                println!("Error executing ffmpeg for subtitle stream {}: {}", stream_idx, e);
+                let _ = fs::remove_file(&output_file);
+            }
+        }
+    }
+
+    // Create list.txt with subtitle filenames (without .vtt extension)
+    if !saved_files.is_empty() {
+        let list_file_path = format!("{}/list.txt", captions_dir);
+        let content = saved_files.join("\n");
+        if let Err(e) = fs::write(&list_file_path, content) {
+            println!("Failed to create list.txt: {}", e);
+        } else {
+            println!("Created list.txt with {} subtitle entries", saved_files.len());
+        }
+    }
+
+    saved_files
 }
 
 fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
