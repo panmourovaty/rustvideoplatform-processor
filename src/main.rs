@@ -1385,6 +1385,8 @@ fn transcode_video(
             EncoderType::Qsv => {
                 let hwaccel_args = "-hwaccel qsv -hwaccel_output_format qsv";
 
+                let la_depth = config.qsv.unwrap().look_ahead_depth;
+                let gq       = config.qsv.unwrap().global_quality;
                 let preset   = "veryslow";
 
                 let codec_params = format!(
