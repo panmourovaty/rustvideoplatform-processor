@@ -1178,8 +1178,8 @@ fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo
         let tonemap_filter = if hdr_info.is_hdr {
             println!("HDR detected: transfer={:?}, primaries={:?}, space={:?}",
                 hdr_info.color_transfer, hdr_info.color_primaries, hdr_info.color_space);
-            // hable tonemapping with 10-bit output
-            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable,zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le".to_string()
+            // mobius tonemapping with 10-bit output
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=mobius,zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le".to_string()
         } else {
             String::new()
         };
