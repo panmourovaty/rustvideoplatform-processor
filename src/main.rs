@@ -1340,22 +1340,7 @@ fn transcode_video(
         config.max_resolution_steps - 1
     };
 
-    let mut extra_outputs = Vec::new();
-    let extra_scales: Vec<(f32, &str)> = vec![
-        (0.5, "half_resolution"),
-    ];
-
-    for (scale, label) in extra_scales {
-        let mut w = (original_width as f32 * scale).round() as u32;
-        let mut h = (original_height as f32 * scale).round() as u32;
-
-        w = (w / 2) * 2;
-        h = (h / 2) * 2;
-
-        if w >= config.min_dimension && h >= config.min_dimension {
-            extra_outputs.push((w, h, label.to_string(), audio_bitrate));
-        }
-    }
+    let epsilon = 0.01; // Allow for tiny rounding variances
 
     for i in 0..num_steps.min(config.quality_steps.len() as u32) {
         let step = &config.quality_steps[i as usize];
@@ -1364,28 +1349,32 @@ fn transcode_video(
             audio_bitrate += config.audio_bitrate_2k_bonus;
         }
 
-        if !outputs.iter().any(|(w, h, _, _)| *w == width && *h == height) {
-            outputs.push((width, height, step.label.clone(), audio_bitrate));
+        let current_ratio = width as f32 / height as f32;
+        let ratio_diff = (current_ratio - aspect_ratio).abs();
+
+        if ratio_diff <= epsilon {
+            if !outputs.iter().any(|(w, h, _, _)| *w == width && *h == height) {
+                outputs.push((width, height, step.label.clone(), audio_bitrate));
+            }
+        } else {
+            println!("Skipping {}x{} due to ratio mismatch", width, height);
         }
 
-        // Calculate next resolution
         let scale_factor = 1.0 / step.scale_divisor as f32;
-        width = ((width as f32 * scale_factor / aspect_ratio).round() * aspect_ratio).round() as u32;
-        height = (width as f32 / aspect_ratio).round() as u32;
 
-        // Ensure dimensions are even and respect min_dimension
-        width = width.max(config.min_dimension);
-        height = height.max(config.min_dimension);
-        width = (width / 2) * 2;
-        height = (height / 2) * 2;
+        let mut new_width = (width as f32 * scale_factor).round() as u32;
+        let mut new_height = (new_width as f32 / aspect_ratio).round() as u32;
+
+        new_width = new_width.max(config.min_dimension);
+        new_height = new_height.max(config.min_dimension);
+
+        new_width = (new_width / 2) * 2;
+        new_height = (new_height / 2) * 2;
+
+        width = new_width;
+        height = new_height;
 
         audio_bitrate = (audio_bitrate / step.audio_bitrate_divisor).max(64);
-    }
-
-    for (w, h, label, abr) in extra_outputs {
-        if !outputs.iter().any(|(ow, oh, _, _)| *ow == w && *oh == h) {
-            outputs.push((w, h, label, abr));
-        }
     }
 
     println!("Generated {} quality outputs: {:?}", outputs.len(), outputs.iter().map(|(_, _, label, _)| label.clone()).collect::<Vec<_>>());
