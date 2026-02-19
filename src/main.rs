@@ -133,13 +133,13 @@ async fn main() {
 fn detect_file_type(input_file: &str) -> Option<String> {
     // Check for video stream
     let video_probe_cmd = format!(
-        "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
+        "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 '{}'",
         input_file
     );
 
     // Check for audio stream
     let audio_probe_cmd = format!(
-        "ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
+        "ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 '{}'",
         input_file
     );
 
@@ -176,7 +176,7 @@ fn detect_file_type(input_file: &str) -> Option<String> {
         // Check duration - if video duration is very short compared to audio,
         // it's likely just cover art for an audio file
         let duration_cmd = format!(
-            "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 '{}'",
             input_file
         );
 
@@ -195,7 +195,7 @@ fn detect_file_type(input_file: &str) -> Option<String> {
 
         // Check if it's a real video
         let nb_frames_cmd = format!(
-            "ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 {}",
+            "ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 '{}'",
             input_file
         );
 
@@ -221,7 +221,7 @@ fn detect_file_type(input_file: &str) -> Option<String> {
 
         // Calculate frame count from duration * fps
         let stream_info_cmd = format!(
-            "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,avg_frame_rate -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,avg_frame_rate -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 '{}'",
             input_file
         );
 
@@ -271,7 +271,7 @@ fn detect_file_type(input_file: &str) -> Option<String> {
 
         // Use duration as fallback heuristic
         let duration_cmd = format!(
-            "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 '{}'",
             input_file
         );
 
@@ -295,7 +295,7 @@ fn detect_file_type(input_file: &str) -> Option<String> {
     if has_video {
         // Check frame count to distinguish between picture (1 frame) and video (>1 frame)
         let nb_frames_cmd = format!(
-            "ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 {}",
+            "ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 '{}'",
             input_file
         );
 
@@ -320,7 +320,7 @@ fn detect_file_type(input_file: &str) -> Option<String> {
 
         // Calculate frame count from duration * fps
         let stream_info_cmd = format!(
-            "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,avg_frame_rate -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,avg_frame_rate -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 '{}'",
             input_file
         );
 
@@ -366,7 +366,7 @@ fn detect_file_type(input_file: &str) -> Option<String> {
 
         // Use duration as fallback - short duration likely a picture
         let duration_cmd = format!(
-            "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {}",
+            "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 '{}'",
             input_file
         );
 
@@ -396,13 +396,39 @@ async fn process(pool: PgPool, video_config: VideoConfig) {
     loop {
         interval.tick().await;
         let unprocessed_concepts =
-            sqlx::query!("SELECT id,type FROM media_concepts WHERE processed = false;")
+            match sqlx::query!("SELECT id,type FROM media_concepts WHERE processed = false;")
                 .fetch_all(&pool)
                 .await
-                .expect("Database error");
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    eprintln!("Database query error (will retry): {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
 
         for concept in unprocessed_concepts {
             let input_file = format!("upload/{}", concept.id);
+
+            // Check that the upload file actually exists before attempting processing
+            if !std::path::Path::new(&input_file).exists() {
+                eprintln!(
+                    "Upload file not found for concept {}, marking as processed to avoid infinite retry",
+                    concept.id
+                );
+                if let Err(e) = sqlx::query!(
+                    "UPDATE media_concepts SET processed = true WHERE id = $1;",
+                    concept.id
+                )
+                .execute(&pool)
+                .await
+                {
+                    eprintln!("Failed to mark missing concept {} as processed: {}", concept.id, e);
+                }
+                continue;
+            }
+
             let detected_type = detect_file_type(&input_file);
 
             // Override database type if detection yields different result
@@ -412,23 +438,48 @@ async fn process(pool: PgPool, video_config: VideoConfig) {
                 concept.r#type.clone()
             };
 
-            if actual_type == "video".to_owned() {
+            let process_result: Result<(), String> = if actual_type == "video" {
                 println!("processing concept: {} as video", concept.id);
-                process_video(concept.id, pool.clone(), video_config.clone()).await;
-            } else if actual_type == "picture".to_owned() {
+                process_video(concept.id.clone(), pool.clone(), video_config.clone())
+                    .await
+                    .map_err(|e| format!("video processing failed: {}", e))
+            } else if actual_type == "picture" {
                 println!("processing concept: {} as picture", concept.id);
-                process_picture(concept.id, pool.clone()).await;
-            } else if actual_type == "audio".to_owned() {
+                process_picture(concept.id.clone(), pool.clone())
+                    .await
+                    .map_err(|e| format!("picture processing failed: {}", e))
+            } else if actual_type == "audio" {
                 println!("processing concept: {} as audio", concept.id);
-                process_audio(concept.id, pool.clone()).await;
+                process_audio(concept.id.clone(), pool.clone())
+                    .await
+                    .map_err(|e| format!("audio processing failed: {}", e))
+            } else {
+                eprintln!(
+                    "Unknown media type '{}' for concept {}, marking as processed",
+                    actual_type, concept.id
+                );
+                if let Err(e) = sqlx::query!(
+                    "UPDATE media_concepts SET processed = true WHERE id = $1;",
+                    concept.id
+                )
+                .execute(&pool)
+                .await
+                {
+                    eprintln!("Failed to mark unknown-type concept {} as processed: {}", concept.id, e);
+                }
+                continue;
+            };
+
+            if let Err(e) = process_result {
+                eprintln!("Error processing concept {}: {}", concept.id, e);
             }
         }
     }
 }
 
-async fn process_video(concept_id: String, pool: PgPool, video_config: VideoConfig) {
+async fn process_video(concept_id: String, pool: PgPool, video_config: VideoConfig) -> Result<(), String> {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
-        .expect("Failed to create concept processing result directory");
+        .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
     // Extract subtitles before transcoding
     let input_file = format!("upload/{}", concept_id);
@@ -443,40 +494,48 @@ async fn process_video(concept_id: String, pool: PgPool, video_config: VideoConf
         format!("upload/{}_processing", concept_id).as_str(),
         &video_config,
     );
-    if transcode_result.is_ok() {
-        sqlx::query!(
-            "UPDATE media_concepts SET processed = true WHERE id = $1;",
-            concept_id
-        )
-        .execute(&pool)
-        .await
-        .expect("Database error");
-        let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+    match transcode_result {
+        Ok(()) => {
+            sqlx::query!(
+                "UPDATE media_concepts SET processed = true WHERE id = $1;",
+                concept_id
+            )
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Database update error: {}", e))?;
+            let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+            Ok(())
+        }
+        Err(e) => Err(format!("Video transcode failed: {}", e)),
     }
 }
 
-async fn process_picture(concept_id: String, pool: PgPool) {
+async fn process_picture(concept_id: String, pool: PgPool) -> Result<(), String> {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
-        .expect("Failed to create concept processing result directory");
+        .map_err(|e| format!("Failed to create processing directory: {}", e))?;
     let transcode_result = transcode_picture(
         format!("upload/{}", concept_id).as_str(),
         format!("upload/{}_processing", concept_id).as_str(),
     );
-    if transcode_result.is_ok() {
-        sqlx::query!(
-            "UPDATE media_concepts SET processed = true WHERE id = $1;",
-            concept_id
-        )
-        .execute(&pool)
-        .await
-        .expect("Database error");
-        let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+    match transcode_result {
+        Ok(()) => {
+            sqlx::query!(
+                "UPDATE media_concepts SET processed = true WHERE id = $1;",
+                concept_id
+            )
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Database update error: {}", e))?;
+            let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+            Ok(())
+        }
+        Err(e) => Err(format!("Picture transcode failed: {}", e)),
     }
 }
 
-async fn process_audio(concept_id: String, pool: PgPool) {
+async fn process_audio(concept_id: String, pool: PgPool) -> Result<(), String> {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
-        .expect("Failed to create concept processing result directory");
+        .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
     // Extract subtitles before transcoding (some audio formats can contain lyrics/subtitles)
     let input_file = format!("upload/{}", concept_id);
@@ -490,15 +549,19 @@ async fn process_audio(concept_id: String, pool: PgPool) {
         format!("upload/{}", concept_id).as_str(),
         format!("upload/{}_processing", concept_id).as_str(),
     );
-    if transcode_result.is_ok() {
-        sqlx::query!(
-            "UPDATE media_concepts SET processed = true WHERE id = $1;",
-            concept_id
-        )
-        .execute(&pool)
-        .await
-        .expect("Database error");
-        let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+    match transcode_result {
+        Ok(()) => {
+            sqlx::query!(
+                "UPDATE media_concepts SET processed = true WHERE id = $1;",
+                concept_id
+            )
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Database update error: {}", e))?;
+            let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+            Ok(())
+        }
+        Err(e) => Err(format!("Audio transcode failed: {}", e)),
     }
 }
 
@@ -777,14 +840,14 @@ fn extract_chapters_to_vtt(input_file: &str, output_dir: &str) {
 fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
     // Get image dimensions
     let probe_cmd = format!(
-        "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+        "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 '{}'",
         input_file
     );
     let output = Command::new("sh")
         .arg("-c")
         .arg(&probe_cmd)
         .output()
-        .expect("Failed to probe image dimensions");
+        .map_err(|_| ffmpeg_next::Error::External)?;
     let dimensions = String::from_utf8_lossy(&output.stdout);
     let (orig_width, orig_height) = parse_dimensions(&dimensions);
 
@@ -793,39 +856,51 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
 
     // Full resolution AVIF
     let transcode_cmd = format!(
-        "ffmpeg -i {} -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif",
+        "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
         input_file, output_dir
     );
     println!("Executing: {}", transcode_cmd);
-    Command::new("sh")
+    let status = Command::new("sh")
         .arg("-c")
         .arg(transcode_cmd)
         .status()
-        .expect("Failed to transcode picture");
+        .map_err(|_| ffmpeg_next::Error::External)?;
+    if !status.success() {
+        eprintln!("Failed to transcode picture to AVIF");
+        return Err(ffmpeg_next::Error::External);
+    }
 
     // HD thumbnail AVIF with proper aspect ratio
     let thumbnail_cmd = format!(
-            "ffmpeg -i {} -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif",
+            "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
             input_file, thumb_width, thumb_height, output_dir
         );
     println!("Executing: {}", thumbnail_cmd);
-    Command::new("sh")
+    let status = Command::new("sh")
         .arg("-c")
         .arg(thumbnail_cmd)
         .status()
-        .expect("Failed to transcode picture thumbnail");
+        .map_err(|_| ffmpeg_next::Error::External)?;
+    if !status.success() {
+        eprintln!("Failed to transcode picture thumbnail AVIF");
+        return Err(ffmpeg_next::Error::External);
+    }
 
     // HD thumbnail JPG for older devices
     let thumbnail_ogp_cmd = format!(
-        "ffmpeg -i {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 {}/thumbnail.jpg",
+        "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 '{}/thumbnail.jpg'",
         input_file, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_ogp_cmd);
-    Command::new("sh")
+    let status = Command::new("sh")
         .arg("-c")
         .arg(thumbnail_ogp_cmd)
         .status()
-        .expect("Failed to transcode picture thumbnail for OGP");
+        .map_err(|_| ffmpeg_next::Error::External)?;
+    if !status.success() {
+        eprintln!("Failed to transcode picture thumbnail JPG");
+        return Err(ffmpeg_next::Error::External);
+    }
 
     Ok(())
 }
@@ -843,7 +918,7 @@ fn parse_dimensions(dim_output: &str) -> (u32, u32) {
 
 fn get_audio_codec(input_file: &str) -> String {
     let codec_cmd = format!(
-        "ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 {}",
+        "ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 '{}'",
         input_file
     );
 
@@ -860,7 +935,7 @@ fn get_audio_codec(input_file: &str) -> String {
 
 fn get_audio_bitrate(input_file: &str) -> u32 {
     let bitrate_cmd = format!(
-        "ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 {}",
+        "ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 '{}'",
         input_file
     );
 
@@ -877,7 +952,7 @@ fn get_audio_bitrate(input_file: &str) -> u32 {
 
 fn has_video_stream(input_file: &str) -> bool {
     let probe_cmd = format!(
-        "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 {}",
+        "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 '{}'",
         input_file
     );
 
@@ -894,7 +969,7 @@ fn is_cover_art_video(input_file: &str) -> bool {
     // Check if video stream duration is very short compared to audio
     // This typically indicates cover art/album art in a music file
     let duration_cmd = format!(
-        "ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=noprint_wrappers=1:nokey=1 {}",
+        "ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=noprint_wrappers=1:nokey=1 '{}'",
         input_file
     );
 
@@ -912,7 +987,7 @@ fn is_cover_art_video(input_file: &str) -> bool {
 
 fn count_audio_streams(input_file: &str) -> u32 {
     let count_cmd = format!(
-        "ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 {} | wc -l",
+        "ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 '{}' | wc -l",
         input_file
     );
 
@@ -927,7 +1002,7 @@ fn count_audio_streams(input_file: &str) -> u32 {
 
 fn count_video_streams(input_file: &str) -> u32 {
     let count_cmd = format!(
-        "ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 {} | wc -l",
+        "ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 '{}' | wc -l",
         input_file
     );
 
@@ -943,7 +1018,7 @@ fn count_video_streams(input_file: &str) -> u32 {
 fn extract_additional_audio(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
     // Get total number of audio streams
     let count_cmd = format!(
-        "ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 {}",
+        "ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 '{}'",
         input_file
     );
 
@@ -951,7 +1026,7 @@ fn extract_additional_audio(input_file: &str, output_dir: &str) -> Result<(), ff
         .arg("-c")
         .arg(&count_cmd)
         .output()
-        .expect("Failed to count audio streams");
+        .map_err(|_| ffmpeg_next::Error::External)?;
 
     let output_str = String::from_utf8_lossy(&output.stdout);
     let streams: Vec<&str> = output_str.trim().split('\n').collect();
@@ -970,16 +1045,18 @@ fn extract_additional_audio(input_file: &str, output_dir: &str) -> Result<(), ff
 
         let output_path = format!("{}/audio_{}.ogg", output_dir, idx + 1);
         let extract_cmd = format!(
-            "ffmpeg -i {} -map 0:a:{} -c:a libopus -b:a {} -vbr on -application audio {} -y",
+            "ffmpeg -nostdin -y -i '{}' -map 0:a:{} -c:a libopus -b:a {} -vbr on -application audio '{}'",
             input_file, stream_idx, bitrate, output_path
         );
 
         println!("Executing: {}", extract_cmd);
-        Command::new("sh")
+        let status = Command::new("sh")
             .arg("-c")
             .arg(&extract_cmd)
-            .status()
-            .expect(&format!("Failed to extract audio stream {}", idx + 1));
+            .status();
+        if let Err(e) = status {
+            eprintln!("Warning: Failed to extract audio stream {}: {}", idx + 1, e);
+        }
     }
 
     Ok(())
@@ -987,7 +1064,7 @@ fn extract_additional_audio(input_file: &str, output_dir: &str) -> Result<(), ff
 
 fn get_audio_codec_for_stream(input_file: &str, stream_idx: u32) -> String {
     let codec_cmd = format!(
-        "ffprobe -v error -select_streams a:{} -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 {}",
+        "ffprobe -v error -select_streams a:{} -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 '{}'",
         stream_idx, input_file
     );
 
@@ -1008,7 +1085,7 @@ fn extract_secondary_video_as_cover(
 ) -> Result<(), ffmpeg_next::Error> {
     // Get dimensions of the secondary video stream (usually the cover art)
     let probe_cmd = format!(
-        "ffprobe -v error -select_streams v:1 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+        "ffprobe -v error -select_streams v:1 -show_entries stream=width,height -of csv=s=x:p=0 '{}'",
         input_file
     );
 
@@ -1022,14 +1099,14 @@ fn extract_secondary_video_as_cover(
         _ => {
             // Fallback to first video stream
             let probe_cmd = format!(
-                "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+                "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 '{}'",
                 input_file
             );
             let output = Command::new("sh")
                 .arg("-c")
                 .arg(&probe_cmd)
                 .output()
-                .expect("Failed to probe video dimensions");
+                .map_err(|_| ffmpeg_next::Error::External)?;
             let dimensions = String::from_utf8_lossy(&output.stdout);
             parse_dimensions(&dimensions)
         }
@@ -1044,39 +1121,36 @@ fn extract_secondary_video_as_cover(
 
     // Extract full resolution cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif -y",
+        "ffmpeg -nostdin -y -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
         input_file, stream_selector, output_dir
     );
     println!("Executing: {}", cover_cmd);
-    Command::new("sh")
+    let _ = Command::new("sh")
         .arg("-c")
         .arg(&cover_cmd)
-        .status()
-        .expect("Failed to extract cover art");
+        .status();
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif -y",
+        "ffmpeg -nostdin -y -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
         input_file, stream_selector, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
-    Command::new("sh")
+    let _ = Command::new("sh")
         .arg("-c")
         .arg(&thumbnail_cmd)
-        .status()
-        .expect("Failed to create cover thumbnail");
+        .status();
 
     // Create thumbnail JPG for older devices
     let thumbnail_jpg_cmd = format!(
-        "ffmpeg -i {} -map 0:{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 {}/thumbnail.jpg -y",
+        "ffmpeg -nostdin -y -i '{}' -map 0:{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 '{}/thumbnail.jpg'",
         input_file, stream_selector, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_jpg_cmd);
-    Command::new("sh")
+    let _ = Command::new("sh")
         .arg("-c")
         .arg(&thumbnail_jpg_cmd)
-        .status()
-        .expect("Failed to create cover thumbnail JPG");
+        .status();
 
     Ok(())
 }
@@ -1084,14 +1158,14 @@ fn extract_secondary_video_as_cover(
 fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
     // Get album cover dimensions
     let probe_cmd = format!(
-        "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 {}",
+        "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 '{}'",
         input_file
     );
     let output = Command::new("sh")
         .arg("-c")
         .arg(&probe_cmd)
         .output()
-        .expect("Failed to probe album cover dimensions");
+        .map_err(|_| ffmpeg_next::Error::External)?;
     let dimensions = String::from_utf8_lossy(&output.stdout);
     let (orig_width, orig_height) = parse_dimensions(&dimensions);
 
@@ -1100,39 +1174,36 @@ fn extract_album_cover(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_
 
     // Extract full resolution album cover
     let cover_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 {}/picture.avif -y",
+        "ffmpeg -nostdin -y -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf 26 -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
         input_file, output_dir
     );
     println!("Executing: {}", cover_cmd);
-    Command::new("sh")
+    let _ = Command::new("sh")
         .arg("-c")
-        .arg(cover_cmd)
-        .status()
-        .expect("Failed to extract album cover");
+        .arg(&cover_cmd)
+        .status();
 
     // Create thumbnail AVIF
     let thumbnail_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 {}/thumbnail.avif -y",
+        "ffmpeg -nostdin -y -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
         input_file, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_cmd);
-    Command::new("sh")
+    let _ = Command::new("sh")
         .arg("-c")
-        .arg(thumbnail_cmd)
-        .status()
-        .expect("Failed to create album cover thumbnail");
+        .arg(&thumbnail_cmd)
+        .status();
 
     // Create thumbnail JPG for older devices
     let thumbnail_jpg_cmd = format!(
-        "ffmpeg -i {} -map 0:v:0 -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 {}/thumbnail.jpg -y",
+        "ffmpeg -nostdin -y -i '{}' -map 0:v:0 -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v 25 '{}/thumbnail.jpg'",
         input_file, thumb_width, thumb_height, output_dir
     );
     println!("Executing: {}", thumbnail_jpg_cmd);
-    Command::new("sh")
+    let _ = Command::new("sh")
         .arg("-c")
-        .arg(thumbnail_jpg_cmd)
-        .status()
-        .expect("Failed to create album cover thumbnail JPG");
+        .arg(&thumbnail_jpg_cmd)
+        .status();
 
     Ok(())
 }
@@ -1155,15 +1226,26 @@ fn transcode_audio(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next
     // Transcode to OGG with Opus
     let output_path = format!("{}/audio.ogg", output_dir);
     let transcode_cmd = format!(
-        "ffmpeg -i {} -c:a libopus -b:a {} -vbr on -application audio {} -y",
+        "ffmpeg -nostdin -y -i '{}' -map 0:a:0 -c:a libopus -b:a {} -vbr on -application audio '{}'",
         input_file, bitrate, output_path
     );
     println!("Executing: {}", transcode_cmd);
-    Command::new("sh")
+    let status = Command::new("sh")
         .arg("-c")
-        .arg(transcode_cmd)
+        .arg(&transcode_cmd)
         .status()
-        .expect("Failed to transcode audio");
+        .map_err(|_| ffmpeg_next::Error::External)?;
+    if !status.success() {
+        eprintln!("Failed to transcode audio to Opus");
+        return Err(ffmpeg_next::Error::External);
+    }
+
+    // Extract additional audio streams if present
+    let audio_stream_count = count_audio_streams(input_file);
+    if audio_stream_count > 1 {
+        println!("Found {} audio streams, extracting additional streams...", audio_stream_count);
+        let _ = extract_additional_audio(input_file, output_dir);
+    }
 
     // Check if audio file has embedded album cover (video stream)
     if has_video_stream(input_file) {
@@ -1225,7 +1307,7 @@ struct HdrInfo {
 
 fn detect_hdr(input_file: &str) -> HdrInfo {
     let cmd = format!(
-        "ffprobe -v error -select_streams v:0 -show_entries stream=color_transfer,color_primaries,color_space -of default=noprint_wrappers=1 {}",
+        "ffprobe -v error -select_streams v:0 -show_entries stream=color_transfer,color_primaries,color_space -of default=noprint_wrappers=1 '{}'",
         input_file
     );
 
@@ -1430,6 +1512,10 @@ fn transcode_video(
     let mut audio_bitrate = config.audio_bitrate_base;
 
     // Calculate aspect ratio once to ensure all resolutions maintain it
+    if original_height == 0 || original_width == 0 {
+        eprintln!("Invalid video dimensions: {}x{}", original_width, original_height);
+        return Err(ffmpeg_next::Error::External);
+    }
     let aspect_ratio = original_width as f32 / original_height as f32;
 
     let mut outputs = Vec::new();
@@ -1440,17 +1526,18 @@ fn transcode_video(
     let num_steps = if (width * height) >= config.threshold_2k_pixels {
         config.max_resolution_steps
     } else {
-        config.max_resolution_steps - 1
+        config.max_resolution_steps.saturating_sub(1)
     };
+
+    // Apply 2K audio bitrate bonus once (not per quality step)
+    if num_steps >= config.max_resolution_steps {
+        audio_bitrate += config.audio_bitrate_2k_bonus;
+    }
 
     let epsilon = 0.01; // Allow for tiny rounding variances
 
     for i in 0..num_steps.min(config.quality_steps.len() as u32) {
         let step = &config.quality_steps[i as usize];
-
-        if num_steps >= config.max_resolution_steps {
-            audio_bitrate += config.audio_bitrate_2k_bonus;
-        }
 
         let current_ratio = width as f32 / height as f32;
         let ratio_diff = (current_ratio - aspect_ratio).abs();
@@ -1502,11 +1589,11 @@ fn transcode_video(
 
                 if hdr_info.is_hdr {
                     format!(
-                        "ffmpeg -y {} -i {} \
+                        "ffmpeg -nostdin -y {} -i '{}' \
                          -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' \
                          {} -pix_fmt p010le \
                          -c:a libopus -b:a {}k -vbr constrained -ac 2 \
-                         -f webm {}",
+                         -f webm '{}'",
                         hwaccel_args,
                         input_file,
                         w, h,
@@ -1516,11 +1603,11 @@ fn transcode_video(
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} \
+                        "ffmpeg -nostdin -y {} -i '{}' \
                          -vf 'vpp_qsv=w={}:h={}:format=p010le' \
                          {} -pix_fmt p010le \
                          -c:a libopus -b:a {}k -vbr constrained -ac 2 \
-                         -f webm {}",
+                         -f webm '{}'",
                         hwaccel_args,
                         input_file,
                         w, h,
@@ -1539,12 +1626,12 @@ fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease:finterp=true", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i {} -vf '{}' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
+                        "ffmpeg -nostdin -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i '{}' -vf '{}' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm '{}'",
                         input_file, filter_chain, codec_params, audio_bitrate, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
+                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm '{}'",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
@@ -1558,12 +1645,12 @@ fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -y -vaapi_device /dev/dri/renderD128 -i {} -vf '{}' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
+                        "ffmpeg -nostdin -y -vaapi_device /dev/dri/renderD128 -i '{}' -vf '{}' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm '{}'",
                         input_file, filter_chain, codec_params, audio_bitrate, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -y {} -i {} -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm {}",
+                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -c:a libopus -b:a {}k -vbr constrained -ac 2 -f webm '{}'",
                         hwaccel_args, input_file, w, h, codec_params, audio_bitrate, output_file
                     )
                 }
@@ -1592,11 +1679,19 @@ fn transcode_video(
     println!("Creating WebM DASH manifest...");
     webm_files.retain(|file| fs::metadata(file).is_ok());
 
-    fs::create_dir_all(&dash_output_dir).expect("Failed to create DASH output directory");
+    if webm_files.is_empty() {
+        eprintln!("No WebM files were successfully encoded, cannot create DASH manifest");
+        return Err(ffmpeg_next::Error::External);
+    }
+
+    fs::create_dir_all(&dash_output_dir).map_err(|e| {
+        eprintln!("Failed to create DASH output directory: {}", e);
+        ffmpeg_next::Error::External
+    })?;
 
     let dash_input_cmds = webm_files
         .iter()
-        .map(|file| format!("-i {}", file))
+        .map(|file| format!("-i '{}'", file))
         .collect::<Vec<String>>()
         .join(" ");
 
@@ -1608,16 +1703,23 @@ fn transcode_video(
     maps.push_str(" -map 0:a");
 
     let dash_output_cmd = format!(
-        "ffmpeg -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' {}/video.mpd",
+        "ffmpeg -nostdin -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' '{}/video.mpd'",
         dash_input_cmds, maps, dash_output_dir
     );
 
     println!("Executing: {}", dash_output_cmd);
-    Command::new("sh")
+    let dash_status = Command::new("sh")
         .arg("-c")
-        .arg(dash_output_cmd)
+        .arg(&dash_output_cmd)
         .status()
-        .expect("Failed to create WebM DASH stream");
+        .map_err(|e| {
+            eprintln!("Failed to execute DASH manifest command: {}", e);
+            ffmpeg_next::Error::External
+        })?;
+    if !dash_status.success() {
+        eprintln!("DASH manifest creation failed with exit code: {:?}", dash_status.code());
+        return Err(ffmpeg_next::Error::External);
+    }
 
     //OGP video - find quarter_resolution dynamically
     let ogp_source = format!("{}/output_quarter_resolution.webm", output_dir);
@@ -1645,31 +1747,36 @@ fn transcode_video(
 
     println!("CREATED OGP VIDEO: {:?}", ogp_video_result);
 
-    // smazat mezividea
+    // Clean up intermediate WebM files
     println!("Remove WebM files...");
     for file in webm_files {
-       fs::remove_file(file).expect("Failed to delete WebM file");
+        if let Err(e) = fs::remove_file(&file) {
+            eprintln!("Warning: Failed to delete intermediate WebM file {}: {}", file, e);
+        }
     }
 
-    // generovat thumbnails
-    let random_time = rand::rng().random_range(0.0..duration);
+    // Generate thumbnails
+    let random_time = if duration > 0.1 {
+        rand::rng().random_range(0.0..duration)
+    } else {
+        0.0
+    };
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
-    // Generate JPG thumbnail
+    // Generate JPG thumbnail (maintain aspect ratio)
     let thumbnail_jpg_cmd = format!(
-        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 -update 1 {}/thumbnail.jpg",
+        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale=1920:1080:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 '{}/thumbnail.jpg'",
         random_time, input_file, output_dir
     );
     println!("Executing: {}", thumbnail_jpg_cmd);
-    Command::new("sh")
+    let _ = Command::new("sh")
         .arg("-c")
         .arg(&thumbnail_jpg_cmd)
-        .status()
-        .expect("Failed to generate jpg thumbnail");
+        .status();
 
-    // Generate AVIF thumbnail
+    // Generate AVIF thumbnail (maintain aspect ratio)
     let thumbnail_avif_cmd = format!(
-        "ffmpeg -y -ss {:.2} -i {} -vf 'scale=1920:1080' -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -update 1 {}/thumbnail.avif",
+        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale=1920:1080:force_original_aspect_ratio=decrease' -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -update 1 '{}/thumbnail.avif'",
         random_time, input_file, output_dir
     );
     println!("Executing: {}", thumbnail_avif_cmd);
@@ -1681,7 +1788,7 @@ fn transcode_video(
     // Generate animated showcase.avif
     println!("Generating showcase.avif...");
     let showcase_cmd = format!(
-        "ffmpeg -y -i {} -vf 'scale=480:-1:force_original_aspect_ratio=decrease,fps=2,format=yuv420p10le' -frames:v 60 -c:v libaom-av1 -pix_fmt yuv420p10le -q:v 40 -cpu-used 6 -row-mt 1 {}/showcase.avif",
+        "ffmpeg -nostdin -y -i '{}' -vf 'scale=480:-1:force_original_aspect_ratio=decrease,fps=2,format=yuv420p10le' -frames:v 60 -c:v libaom-av1 -pix_fmt yuv420p10le -q:v 40 -cpu-used 6 -row-mt 1 '{}/showcase.avif'",
         input_file, output_dir
     );
     println!("Executing: {}", showcase_cmd);
@@ -1704,7 +1811,10 @@ fn transcode_video(
 
     // Generate thumbnail sprites for vidstack.io (max 100 sprites per file)
     let preview_output_dir = format!("{}/previews", output_dir);
-    fs::create_dir_all(&preview_output_dir).expect("Failed to create preview output directory");
+    fs::create_dir_all(&preview_output_dir).map_err(|e| {
+        eprintln!("Failed to create preview output directory: {}", e);
+        ffmpeg_next::Error::External
+    })?;
 
     let interval_seconds = 10.0; // 10 second intervals for smoother seeking
     let thumb_width = 160;
@@ -1712,9 +1822,13 @@ fn transcode_video(
     let max_sprites_per_file = 100;
     let sprites_across = 10; // 10 thumbnails per row in the sprite
 
-    // Calculate number of thumbnails needed
-    let num_thumbnails = (duration / interval_seconds).ceil() as u32;
-    let num_sprite_files = ((num_thumbnails as f32) / (max_sprites_per_file as f32)).ceil() as u32;
+    // Calculate number of thumbnails needed (at least 1 for very short videos)
+    let num_thumbnails = if duration > 0.0 {
+        (duration / interval_seconds).ceil().max(1.0) as u32
+    } else {
+        1
+    };
+    let num_sprite_files = ((num_thumbnails as f32) / (max_sprites_per_file as f32)).ceil().max(1.0) as u32;
 
     println!(
         "Generating {} thumbnail sprites with {} total thumbnails (max {} per file)...",
@@ -1741,7 +1855,7 @@ fn transcode_video(
         );
 
         let sprite_cmd = format!(
-            "ffmpeg -y -ss {:.3} -t {:.3} -i {} -vf '{}' -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 60 -r 1 -frames:v 1 -update 1 {}",
+            "ffmpeg -nostdin -y -ss {:.3} -t {:.3} -i '{}' -vf '{}' -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 60 -r 1 -frames:v 1 -update 1 '{}'",
             start_time, duration_for_this_file, input_file, tile_filter, sprite_path
         );
 
@@ -1806,7 +1920,9 @@ fn transcode_video(
         ));
     }
 
-    fs::write(&vtt_path, vtt_content).expect("Failed to write thumbnails.vtt file");
+    if let Err(e) = fs::write(&vtt_path, vtt_content) {
+        eprintln!("Warning: Failed to write thumbnails.vtt file: {}", e);
+    }
     println!(
         "Generated WebVTT thumbnails file with {} cues across {} sprite files",
         vtt_cues.len(),
