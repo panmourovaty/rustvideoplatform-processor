@@ -19,6 +19,23 @@ struct FfprobeOutput {
 }
 
 #[derive(Deserialize, Debug)]
+struct FfprobeChaptersOutput {
+    chapters: Option<Vec<FfprobeChapter>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FfprobeChapter {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    tags: Option<FfprobeChapterTags>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FfprobeChapterTags {
+    title: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
 struct FfprobeStream {
     index: Option<u32>,
     codec_name: Option<String>,
@@ -418,6 +435,9 @@ async fn process_video(concept_id: String, pool: PgPool, video_config: VideoConf
     let output_dir = format!("upload/{}_processing", concept_id);
     extract_subtitles_to_vtt(&input_file, &output_dir);
 
+    // Extract chapters if present
+    extract_chapters_to_vtt(&input_file, &output_dir);
+
     let transcode_result = transcode_video(
         format!("upload/{}", concept_id).as_str(),
         format!("upload/{}_processing", concept_id).as_str(),
@@ -462,6 +482,9 @@ async fn process_audio(concept_id: String, pool: PgPool) {
     let input_file = format!("upload/{}", concept_id);
     let output_dir = format!("upload/{}_processing", concept_id);
     extract_subtitles_to_vtt(&input_file, &output_dir);
+
+    // Extract chapters if present (audiobooks, podcasts, etc.)
+    extract_chapters_to_vtt(&input_file, &output_dir);
 
     let transcode_result = transcode_audio(
         format!("upload/{}", concept_id).as_str(),
@@ -669,6 +692,86 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
     }
 
     saved_files
+}
+
+fn extract_chapters_to_vtt(input_file: &str, output_dir: &str) {
+    // Probe chapters using ffprobe JSON output
+    let mut cmd = Command::new("ffprobe");
+    cmd.arg("-v")
+        .arg("error")
+        .arg("-show_chapters")
+        .arg("-print_format")
+        .arg("json")
+        .arg(input_file);
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            println!("Failed to probe chapters: {}", e);
+            return;
+        }
+    };
+
+    if !output.status.success() {
+        return;
+    }
+
+    let parsed: FfprobeChaptersOutput = match serde_json::from_slice(&output.stdout) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let chapters = match parsed.chapters {
+        Some(c) if !c.is_empty() => c,
+        _ => return,
+    };
+
+    // Build WebVTT content
+    let mut vtt_content = String::from("WEBVTT\n\n");
+
+    for chapter in &chapters {
+        let start_seconds: f64 = chapter
+            .start_time
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let end_seconds: f64 = chapter
+            .end_time
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+
+        let title = chapter
+            .tags
+            .as_ref()
+            .and_then(|t| t.title.as_deref())
+            .unwrap_or("");
+
+        if title.is_empty() {
+            continue;
+        }
+
+        let start_formatted = format_timestamp_vtt(start_seconds);
+        let end_formatted = format_timestamp_vtt(end_seconds);
+
+        vtt_content.push_str(&format!(
+            "{} --> {}\n{}\n\n",
+            start_formatted, end_formatted, title
+        ));
+    }
+
+    // Only write if we had at least one chapter with a title
+    if vtt_content.len() > "WEBVTT\n\n".len() {
+        let output_path = format!("{}/chapters.vtt", output_dir);
+        match fs::write(&output_path, &vtt_content) {
+            Ok(_) => println!(
+                "Extracted {} chapters to {}",
+                chapters.len(),
+                output_path
+            ),
+            Err(e) => println!("Failed to write chapters.vtt: {}", e),
+        }
+    }
 }
 
 fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_next::Error> {
