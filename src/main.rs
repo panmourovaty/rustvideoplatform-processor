@@ -1595,8 +1595,9 @@ fn post_process_dash_manifest(
     audio_info: &[(String, String, String)], // Vec of (file_path, language, title)
 ) {
     // Add <Label> and <Role> elements to audio AdaptationSets in the MPD manifest.
-    // This enables DASH players to distinguish same-language audio tracks
-    // (e.g., "English" vs "English - Director's Commentary").
+    // This enables DASH players to distinguish audio tracks, especially when
+    // multiple tracks share the same language (e.g., "English" vs "English - Director's Commentary")
+    // or have no metadata at all.
     if audio_info.len() <= 1 && audio_info.iter().all(|(_, _, title)| title.is_empty()) {
         // Single audio stream without title - no need to post-process
         return;
@@ -1610,6 +1611,45 @@ fn post_process_dash_manifest(
         }
     };
 
+    // Pre-compute labels with disambiguation for duplicates.
+    // E.g., three "eng" tracks with no title become: "eng", "eng (2)", "eng (3)"
+    // Tracks with unique titles are left as-is.
+    let mut raw_labels: Vec<String> = Vec::with_capacity(audio_info.len());
+    for (_, language, title) in audio_info {
+        let label = if !title.is_empty() {
+            title.clone()
+        } else if !language.is_empty() {
+            language.clone()
+        } else {
+            format!("Track")
+        };
+        raw_labels.push(label);
+    }
+
+    // Count occurrences of each label and disambiguate duplicates
+    let mut labels: Vec<String> = Vec::with_capacity(raw_labels.len());
+    let mut seen_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    // First pass: count total occurrences of each label
+    let mut total_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for label in &raw_labels {
+        *total_count.entry(label.clone()).or_insert(0) += 1;
+    }
+    // Second pass: build disambiguated labels
+    for label in &raw_labels {
+        let count = *total_count.get(label).unwrap_or(&1);
+        if count > 1 {
+            let seen = seen_count.entry(label.clone()).or_insert(0);
+            *seen += 1;
+            if *seen == 1 {
+                labels.push(label.clone());
+            } else {
+                labels.push(format!("{} ({})", label, seen));
+            }
+        } else {
+            labels.push(label.clone());
+        }
+    }
+
     let mut result = String::with_capacity(mpd_content.len() + 512);
     let mut audio_adaptation_idx = 0;
 
@@ -1620,25 +1660,15 @@ fn post_process_dash_manifest(
         // Detect audio AdaptationSet opening tags
         if line.contains("<AdaptationSet") && line.contains("contentType=\"audio\"") {
             if audio_adaptation_idx < audio_info.len() {
-                let (_, language, title) = &audio_info[audio_adaptation_idx];
-
-                // Determine the label text
-                let label = if !title.is_empty() {
-                    title.clone()
-                } else if !language.is_empty() {
-                    language.clone()
-                } else {
-                    String::new()
-                };
+                let (_, _, title) = &audio_info[audio_adaptation_idx];
+                let label = &labels[audio_adaptation_idx];
 
                 // Detect indentation from the AdaptationSet line
                 let indent = &line[..line.len() - line.trim_start().len()];
                 let child_indent = format!("{}  ", indent);
 
-                // Add <Label> element if we have one
-                if !label.is_empty() {
-                    result.push_str(&format!("{}<Label>{}</Label>\n", child_indent, label));
-                }
+                // Add <Label> element
+                result.push_str(&format!("{}<Label>{}</Label>\n", child_indent, label));
 
                 // Add <Role> element for commentary tracks
                 let title_lower = title.to_lowercase();
@@ -1660,10 +1690,19 @@ fn post_process_dash_manifest(
         }
     }
 
+    // Verify all expected audio tracks were found in the MPD
+    if audio_adaptation_idx != audio_info.len() {
+        eprintln!(
+            "WARNING: MPD audio track count mismatch! Expected {} audio AdaptationSets but found {} in MPD. Some audio tracks may be missing.",
+            audio_info.len(),
+            audio_adaptation_idx
+        );
+    }
+
     if let Err(e) = fs::write(mpd_path, result) {
         eprintln!("Warning: Could not write post-processed MPD: {}", e);
     } else {
-        println!("Post-processed MPD with {} audio label(s)", audio_adaptation_idx);
+        println!("Post-processed MPD with {} audio label(s): {:?}", audio_adaptation_idx, labels);
     }
 }
 
@@ -1897,6 +1936,15 @@ fn transcode_video(
     } else {
         Vec::new()
     };
+
+    // Verify all audio streams were successfully transcoded
+    if audio_webm_files.len() != audio_streams.len() {
+        eprintln!(
+            "WARNING: Audio stream count mismatch! Source has {} audio stream(s) but only {} were successfully transcoded. Missing tracks will not appear in DASH manifest.",
+            audio_streams.len(),
+            audio_webm_files.len()
+        );
+    }
 
     // Build DASH inputs: video files first, then audio files
     let num_video_files = webm_files.len();
