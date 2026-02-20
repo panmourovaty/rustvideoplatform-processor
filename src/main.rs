@@ -679,8 +679,8 @@ fn transcode_audio_streams_for_dash(
     output_dir: &str,
     audio_bitrate: u32,
     audio_streams: &[(u32, String, String, String)],
-) -> Vec<(String, String)> {
-    // Returns Vec of (file_path, language) for successfully transcoded audio streams
+) -> Vec<(String, String, String)> {
+    // Returns Vec of (file_path, language, title) for successfully transcoded audio streams
     let mut result = Vec::new();
 
     for (audio_idx, (_stream_index, language, title, _codec)) in audio_streams.iter().enumerate() {
@@ -716,7 +716,7 @@ fn transcode_audio_streams_for_dash(
                     if language.is_empty() { "und" } else { language },
                     if title.is_empty() { "none" } else { title }
                 );
-                result.push((output_file, language.clone()));
+                result.push((output_file, language.clone(), title.clone()));
             }
             Ok(s) => {
                 eprintln!(
@@ -1590,6 +1590,83 @@ fn format_timestamp_vtt(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, secs, millis)
 }
 
+fn post_process_dash_manifest(
+    mpd_path: &str,
+    audio_info: &[(String, String, String)], // Vec of (file_path, language, title)
+) {
+    // Add <Label> and <Role> elements to audio AdaptationSets in the MPD manifest.
+    // This enables DASH players to distinguish same-language audio tracks
+    // (e.g., "English" vs "English - Director's Commentary").
+    if audio_info.len() <= 1 && audio_info.iter().all(|(_, _, title)| title.is_empty()) {
+        // Single audio stream without title - no need to post-process
+        return;
+    }
+
+    let mpd_content = match fs::read_to_string(mpd_path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("Warning: Could not read MPD for post-processing: {}", e);
+            return;
+        }
+    };
+
+    let mut result = String::with_capacity(mpd_content.len() + 512);
+    let mut audio_adaptation_idx = 0;
+
+    for line in mpd_content.lines() {
+        result.push_str(line);
+        result.push('\n');
+
+        // Detect audio AdaptationSet opening tags
+        if line.contains("<AdaptationSet") && line.contains("contentType=\"audio\"") {
+            if audio_adaptation_idx < audio_info.len() {
+                let (_, language, title) = &audio_info[audio_adaptation_idx];
+
+                // Determine the label text
+                let label = if !title.is_empty() {
+                    title.clone()
+                } else if !language.is_empty() {
+                    language.clone()
+                } else {
+                    String::new()
+                };
+
+                // Detect indentation from the AdaptationSet line
+                let indent = &line[..line.len() - line.trim_start().len()];
+                let child_indent = format!("{}  ", indent);
+
+                // Add <Label> element if we have one
+                if !label.is_empty() {
+                    result.push_str(&format!("{}<Label>{}</Label>\n", child_indent, label));
+                }
+
+                // Add <Role> element for commentary tracks
+                let title_lower = title.to_lowercase();
+                if title_lower.contains("commentary") || title_lower.contains("komentář") {
+                    result.push_str(&format!(
+                        "{}<Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"commentary\"/>\n",
+                        child_indent
+                    ));
+                } else if audio_info.len() > 1 && audio_adaptation_idx == 0 {
+                    // Mark the first audio track as "main" when there are multiple tracks
+                    result.push_str(&format!(
+                        "{}<Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\"/>\n",
+                        child_indent
+                    ));
+                }
+
+                audio_adaptation_idx += 1;
+            }
+        }
+    }
+
+    if let Err(e) = fs::write(mpd_path, result) {
+        eprintln!("Warning: Could not write post-processed MPD: {}", e);
+    } else {
+        println!("Post-processed MPD with {} audio label(s)", audio_adaptation_idx);
+    }
+}
+
 fn transcode_video(
     input_file: &str,
     output_dir: &str,
@@ -1827,7 +1904,7 @@ fn transcode_video(
         .iter()
         .map(|file| format!("-i '{}'", file))
         .collect();
-    for (audio_file, _) in &audio_webm_files {
+    for (audio_file, _, _) in &audio_webm_files {
         all_inputs.push(format!("-i '{}'", audio_file));
     }
     let dash_input_cmds = all_inputs.join(" ");
@@ -1838,7 +1915,7 @@ fn transcode_video(
         maps.push_str(&format!(" -map {}:v", track_num));
     }
     for (audio_idx, _) in audio_webm_files.iter().enumerate() {
-        maps.push_str(&format!(" -map {}:a", num_video_files + audio_idx));
+        maps.push_str(&format!(" -map {}:a:0", num_video_files + audio_idx));
     }
 
     // Fallback: if no separate audio files, map audio from first video file
@@ -1858,7 +1935,7 @@ fn transcode_video(
         }
     } else {
         // Multiple audio streams: separate adaptation set per language
-        for (audio_idx, _) in audio_webm_files.iter().enumerate() {
+        for (audio_idx, _audio_info) in audio_webm_files.iter().enumerate() {
             let output_stream_idx = num_video_outputs + audio_idx;
             adaptation_sets.push_str(&format!(" id={},streams={}", audio_idx + 1, output_stream_idx));
         }
@@ -1866,7 +1943,7 @@ fn transcode_video(
 
     // Build language metadata for audio streams
     let mut metadata_args = String::new();
-    for (audio_idx, (_, language)) in audio_webm_files.iter().enumerate() {
+    for (audio_idx, (_, language, _)) in audio_webm_files.iter().enumerate() {
         let output_stream_idx = num_video_outputs + audio_idx;
         if !language.is_empty() {
             metadata_args.push_str(&format!(" -metadata:s:{} language={}", output_stream_idx, language));
@@ -1891,6 +1968,10 @@ fn transcode_video(
         eprintln!("DASH manifest creation failed with exit code: {:?}", dash_status.code());
         return Err(ffmpeg_next::Error::External);
     }
+
+    // Post-process MPD to add <Label> and <Role> elements for audio track selection
+    let mpd_path = format!("{}/video.mpd", dash_output_dir);
+    post_process_dash_manifest(&mpd_path, &audio_webm_files);
 
     //OGP video - find quarter_resolution dynamically
     let ogp_source = format!("{}/output_quarter_resolution.webm", output_dir);
@@ -1928,7 +2009,7 @@ fn transcode_video(
 
     // Clean up intermediate audio WebM files
     println!("Remove audio WebM files...");
-    for (audio_file, _) in &audio_webm_files {
+    for (audio_file, _, _) in &audio_webm_files {
         if let Err(e) = fs::remove_file(audio_file) {
             eprintln!("Warning: Failed to delete intermediate audio WebM file {}: {}", audio_file, e);
         }
