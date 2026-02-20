@@ -621,6 +621,119 @@ fn probe_subtitle_streams(input_file: &str) -> Vec<(u32, String, String, String)
     result
 }
 
+fn probe_audio_streams(input_file: &str) -> Vec<(u32, String, String, String)> {
+    // Returns Vec of (stream_index, language, title, codec)
+    let mut cmd = Command::new("ffprobe");
+    cmd.arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("a")
+        .arg("-show_entries")
+        .arg("stream=index,codec_name:stream_tags=language,title")
+        .arg("-of")
+        .arg("json")
+        .arg(input_file);
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let parsed: FfprobeOutput = match serde_json::from_slice(&output.stdout) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    let streams = match parsed.streams {
+        Some(s) => s,
+        None => return result,
+    };
+
+    for s in streams {
+        let idx = match s.index {
+            Some(i) => i,
+            None => continue,
+        };
+        let codec = s.codec_name.unwrap_or_else(|| "unknown".to_string());
+        let (language, title) = match s.tags {
+            Some(t) => (
+                t.language.unwrap_or_default(),
+                t.title.unwrap_or_default(),
+            ),
+            None => (String::new(), String::new()),
+        };
+
+        result.push((idx, language, title, codec));
+    }
+
+    result
+}
+
+fn transcode_audio_streams_for_dash(
+    input_file: &str,
+    output_dir: &str,
+    audio_bitrate: u32,
+    audio_streams: &[(u32, String, String, String)],
+) -> Vec<(String, String, String)> {
+    // Returns Vec of (file_path, language, title) for successfully transcoded audio streams
+    let mut result = Vec::new();
+
+    for (audio_idx, (_stream_index, language, title, _codec)) in audio_streams.iter().enumerate() {
+        let output_file = format!("{}/audio_stream_{}.webm", output_dir, audio_idx);
+
+        let mut cmd = format!(
+            "ffmpeg -nostdin -y -i '{}' -map 0:a:{} -c:a libopus -b:a {}k -vbr constrained -ac 2 -vn",
+            input_file, audio_idx, audio_bitrate
+        );
+
+        // Set language metadata if available
+        if !language.is_empty() {
+            cmd.push_str(&format!(" -metadata:s:a:0 language={}", language));
+        }
+        if !title.is_empty() {
+            cmd.push_str(&format!(" -metadata:s:a:0 title='{}'", title.replace('\'', "'\\''")));
+        }
+
+        cmd.push_str(&format!(" -f webm '{}'", output_file));
+
+        println!("Executing: {}", cmd);
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {
+                println!(
+                    "Generated audio stream {}: {} (language: {}, title: {})",
+                    audio_idx,
+                    output_file,
+                    if language.is_empty() { "und" } else { language },
+                    if title.is_empty() { "none" } else { title }
+                );
+                result.push((output_file, language.clone(), title.clone()));
+            }
+            Ok(s) => {
+                eprintln!(
+                    "Failed to transcode audio stream {} with exit code: {:?}",
+                    audio_idx,
+                    s.code()
+                );
+            }
+            Err(e) => {
+                eprintln!("Failed to execute ffmpeg for audio stream {}: {}", audio_idx, e);
+            }
+        }
+    }
+
+    result
+}
+
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
@@ -1477,6 +1590,122 @@ fn format_timestamp_vtt(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, secs, millis)
 }
 
+fn post_process_dash_manifest(
+    mpd_path: &str,
+    audio_info: &[(String, String, String)], // Vec of (file_path, language, title)
+) {
+    // Add <Label> and <Role> elements to audio AdaptationSets in the MPD manifest.
+    // This enables DASH players to distinguish audio tracks, especially when
+    // multiple tracks share the same language (e.g., "English" vs "English - Director's Commentary")
+    // or have no metadata at all.
+    if audio_info.len() <= 1 && audio_info.iter().all(|(_, _, title)| title.is_empty()) {
+        // Single audio stream without title - no need to post-process
+        return;
+    }
+
+    let mpd_content = match fs::read_to_string(mpd_path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("Warning: Could not read MPD for post-processing: {}", e);
+            return;
+        }
+    };
+
+    // Pre-compute labels with disambiguation for duplicates.
+    // E.g., three "eng" tracks with no title become: "eng", "eng (2)", "eng (3)"
+    // Tracks with unique titles are left as-is.
+    let mut raw_labels: Vec<String> = Vec::with_capacity(audio_info.len());
+    for (_, language, title) in audio_info {
+        let label = if !title.is_empty() {
+            title.clone()
+        } else if !language.is_empty() {
+            language.clone()
+        } else {
+            format!("Track")
+        };
+        raw_labels.push(label);
+    }
+
+    // Count occurrences of each label and disambiguate duplicates
+    let mut labels: Vec<String> = Vec::with_capacity(raw_labels.len());
+    let mut seen_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    // First pass: count total occurrences of each label
+    let mut total_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for label in &raw_labels {
+        *total_count.entry(label.clone()).or_insert(0) += 1;
+    }
+    // Second pass: build disambiguated labels
+    for label in &raw_labels {
+        let count = *total_count.get(label).unwrap_or(&1);
+        if count > 1 {
+            let seen = seen_count.entry(label.clone()).or_insert(0);
+            *seen += 1;
+            if *seen == 1 {
+                labels.push(label.clone());
+            } else {
+                labels.push(format!("{} ({})", label, seen));
+            }
+        } else {
+            labels.push(label.clone());
+        }
+    }
+
+    let mut result = String::with_capacity(mpd_content.len() + 512);
+    let mut audio_adaptation_idx = 0;
+
+    for line in mpd_content.lines() {
+        result.push_str(line);
+        result.push('\n');
+
+        // Detect audio AdaptationSet opening tags
+        if line.contains("<AdaptationSet") && line.contains("contentType=\"audio\"") {
+            if audio_adaptation_idx < audio_info.len() {
+                let (_, _, title) = &audio_info[audio_adaptation_idx];
+                let label = &labels[audio_adaptation_idx];
+
+                // Detect indentation from the AdaptationSet line
+                let indent = &line[..line.len() - line.trim_start().len()];
+                let child_indent = format!("{}  ", indent);
+
+                // Add <Label> element
+                result.push_str(&format!("{}<Label>{}</Label>\n", child_indent, label));
+
+                // Add <Role> element for commentary tracks
+                let title_lower = title.to_lowercase();
+                if title_lower.contains("commentary") || title_lower.contains("komentář") {
+                    result.push_str(&format!(
+                        "{}<Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"commentary\"/>\n",
+                        child_indent
+                    ));
+                } else if audio_info.len() > 1 && audio_adaptation_idx == 0 {
+                    // Mark the first audio track as "main" when there are multiple tracks
+                    result.push_str(&format!(
+                        "{}<Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\"/>\n",
+                        child_indent
+                    ));
+                }
+
+                audio_adaptation_idx += 1;
+            }
+        }
+    }
+
+    // Verify all expected audio tracks were found in the MPD
+    if audio_adaptation_idx != audio_info.len() {
+        eprintln!(
+            "WARNING: MPD audio track count mismatch! Expected {} audio AdaptationSets but found {} in MPD. Some audio tracks may be missing.",
+            audio_info.len(),
+            audio_adaptation_idx
+        );
+    }
+
+    if let Err(e) = fs::write(mpd_path, result) {
+        eprintln!("Warning: Could not write post-processed MPD: {}", e);
+    } else {
+        println!("Post-processed MPD with {} audio label(s): {:?}", audio_adaptation_idx, labels);
+    }
+}
+
 fn transcode_video(
     input_file: &str,
     output_dir: &str,
@@ -1533,6 +1762,9 @@ fn transcode_video(
     if num_steps >= config.max_resolution_steps {
         audio_bitrate += config.audio_bitrate_2k_bonus;
     }
+
+    // Save the best audio bitrate for separate DASH audio transcoding
+    let dash_audio_bitrate = audio_bitrate;
 
     let epsilon = 0.01; // Allow for tiny rounding variances
 
@@ -1689,22 +1921,86 @@ fn transcode_video(
         ffmpeg_next::Error::External
     })?;
 
-    let dash_input_cmds = webm_files
-        .iter()
-        .map(|file| format!("-i '{}'", file))
-        .collect::<Vec<String>>()
-        .join(" ");
+    // Probe and transcode all audio streams for multi-language DASH support
+    let audio_streams = probe_audio_streams(input_file);
+    println!(
+        "Found {} audio stream(s): {:?}",
+        audio_streams.len(),
+        audio_streams.iter().map(|(_, lang, title, _)| {
+            format!("{}({})", if lang.is_empty() { "und" } else { lang }, if title.is_empty() { "none" } else { title })
+        }).collect::<Vec<_>>()
+    );
 
-    let mut maps: String = String::new();
-    for track_num in 0..webm_files.len() {
-        maps.push_str(&format!(" -map {}:v", track_num));
+    let audio_webm_files = if !audio_streams.is_empty() {
+        transcode_audio_streams_for_dash(input_file, output_dir, dash_audio_bitrate, &audio_streams)
+    } else {
+        Vec::new()
+    };
+
+    // Verify all audio streams were successfully transcoded
+    if audio_webm_files.len() != audio_streams.len() {
+        eprintln!(
+            "WARNING: Audio stream count mismatch! Source has {} audio stream(s) but only {} were successfully transcoded. Missing tracks will not appear in DASH manifest.",
+            audio_streams.len(),
+            audio_webm_files.len()
+        );
     }
 
-    maps.push_str(" -map 0:a");
+    // Build DASH inputs: video files first, then audio files
+    let num_video_files = webm_files.len();
+    let mut all_inputs: Vec<String> = webm_files
+        .iter()
+        .map(|file| format!("-i '{}'", file))
+        .collect();
+    for (audio_file, _, _) in &audio_webm_files {
+        all_inputs.push(format!("-i '{}'", audio_file));
+    }
+    let dash_input_cmds = all_inputs.join(" ");
+
+    // Build maps: video from video files, audio from audio-only files
+    let mut maps = String::new();
+    for track_num in 0..num_video_files {
+        maps.push_str(&format!(" -map {}:v", track_num));
+    }
+    for (audio_idx, _) in audio_webm_files.iter().enumerate() {
+        maps.push_str(&format!(" -map {}:a:0", num_video_files + audio_idx));
+    }
+
+    // Fallback: if no separate audio files, map audio from first video file
+    if audio_webm_files.is_empty() {
+        maps.push_str(" -map 0:a?");
+    }
+
+    // Build adaptation sets: one for video, one per audio language
+    // Output stream indices: 0..num_video-1 are video, num_video..num_video+num_audio-1 are audio
+    let num_video_outputs = num_video_files;
+    let mut adaptation_sets = String::from("id=0,streams=v");
+
+    if audio_webm_files.len() <= 1 {
+        // Single audio (or none): simple adaptation set
+        if !audio_webm_files.is_empty() {
+            adaptation_sets.push_str(&format!(" id=1,streams={}", num_video_outputs));
+        }
+    } else {
+        // Multiple audio streams: separate adaptation set per language
+        for (audio_idx, _audio_info) in audio_webm_files.iter().enumerate() {
+            let output_stream_idx = num_video_outputs + audio_idx;
+            adaptation_sets.push_str(&format!(" id={},streams={}", audio_idx + 1, output_stream_idx));
+        }
+    }
+
+    // Build language metadata for audio streams
+    let mut metadata_args = String::new();
+    for (audio_idx, (_, language, _)) in audio_webm_files.iter().enumerate() {
+        let output_stream_idx = num_video_outputs + audio_idx;
+        if !language.is_empty() {
+            metadata_args.push_str(&format!(" -metadata:s:{} language={}", output_stream_idx, language));
+        }
+    }
 
     let dash_output_cmd = format!(
-        "ffmpeg -nostdin -y {} {} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets 'id=0,streams=v id=1,streams=a' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' '{}/video.mpd'",
-        dash_input_cmds, maps, dash_output_dir
+        "ffmpeg -nostdin -y {} {}{} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets '{}' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' '{}/video.mpd'",
+        dash_input_cmds, maps, metadata_args, adaptation_sets, dash_output_dir
     );
 
     println!("Executing: {}", dash_output_cmd);
@@ -1721,18 +2017,22 @@ fn transcode_video(
         return Err(ffmpeg_next::Error::External);
     }
 
+    // Post-process MPD to add <Label> and <Role> elements for audio track selection
+    let mpd_path = format!("{}/video.mpd", dash_output_dir);
+    post_process_dash_manifest(&mpd_path, &audio_webm_files);
+
     //OGP video - find quarter_resolution dynamically
     let ogp_source = format!("{}/output_quarter_resolution.webm", output_dir);
     let ogp_dest = format!("{}/video/video.webm", output_dir);
 
     let ogp_video_result = if fs::metadata(&ogp_source).is_ok() {
-        fs::rename(&ogp_source, ogp_dest)
+        fs::rename(&ogp_source, &ogp_dest)
     } else {
         // Fallback: use the middle quality available
         if !webm_files.is_empty() {
             let middle_idx = webm_files.len() / 2;
             let fallback_source = &webm_files[middle_idx];
-            let fallback_result = fs::rename(fallback_source, ogp_dest.clone());
+            let fallback_result = fs::rename(fallback_source, &ogp_dest);
             webm_files.remove(middle_idx);
             fallback_result
         } else {
@@ -1752,6 +2052,14 @@ fn transcode_video(
     for file in webm_files {
         if let Err(e) = fs::remove_file(&file) {
             eprintln!("Warning: Failed to delete intermediate WebM file {}: {}", file, e);
+        }
+    }
+
+    // Clean up intermediate audio WebM files
+    println!("Remove audio WebM files...");
+    for (audio_file, _, _) in &audio_webm_files {
+        if let Err(e) = fs::remove_file(audio_file) {
+            eprintln!("Warning: Failed to delete intermediate audio WebM file {}: {}", audio_file, e);
         }
     }
 
