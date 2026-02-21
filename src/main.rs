@@ -2096,7 +2096,7 @@ fn transcode_video(
     // Generate animated showcase.avif
     println!("Generating showcase.avif...");
     let showcase_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -vf 'scale=480:-2,fps=2,format=yuv420p10le' -frames:v 60 -c:v libaom-av1 -pix_fmt yuv420p10le -q:v 40 -cpu-used 6 -row-mt 1 '{}/showcase.avif'",
+        "ffmpeg -nostdin -y -i '{}' -vf 'scale=480:-2,fps=2,format=yuv420p10le' -frames:v 60 -c:v libaom-av1 -pix_fmt yuv420p10le -q:v 40 -cpu-used 2 -row-mt 1 '{}/showcase.avif'",
         input_file, output_dir
     );
     println!("Executing: {}", showcase_cmd);
@@ -2163,7 +2163,7 @@ fn transcode_video(
         );
 
         let sprite_cmd = format!(
-            "ffmpeg -nostdin -y -ss {:.3} -t {:.3} -i '{}' -vf '{}' -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 60 -r 1 -frames:v 1 -update 1 '{}'",
+            "ffmpeg -nostdin -y -ss {:.3} -t {:.3} -i '{}' -vf '{}' -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 40 -r 1 -frames:v 1 -update 1 '{}'",
             start_time, duration_for_this_file, input_file, tile_filter, sprite_path
         );
 
