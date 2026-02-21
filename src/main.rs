@@ -2096,7 +2096,7 @@ fn transcode_video(
     // Generate animated showcase.avif
     println!("Generating showcase.avif...");
     let showcase_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -vf 'scale=480:-1:force_original_aspect_ratio=decrease,fps=2,format=yuv420p10le' -frames:v 60 -c:v libaom-av1 -pix_fmt yuv420p10le -q:v 40 -cpu-used 6 -row-mt 1 '{}/showcase.avif'",
+        "ffmpeg -nostdin -y -i '{}' -vf 'scale=480:-2,fps=2,format=yuv420p10le' -frames:v 60 -c:v libaom-av1 -pix_fmt yuv420p10le -q:v 40 -cpu-used 6 -row-mt 1 '{}/showcase.avif'",
         input_file, output_dir
     );
     println!("Executing: {}", showcase_cmd);
