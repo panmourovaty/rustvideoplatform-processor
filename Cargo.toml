@@ -11,3 +11,4 @@ serde_json = "*"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 rand = "0.9"
 ffmpeg-next = "8.0"
+reqwest = { version = "0.13", features = ["blocking", "multipart"] }

@@ -52,6 +52,7 @@ struct FfprobeTags {
 struct Config {
     dbconnection: String,
     video: VideoConfig,
+    whisper_url: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -741,9 +742,12 @@ fn sanitize_filename(name: &str) -> String {
 }
 
 fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
-    let subtitle_streams = probe_subtitle_streams(input_file);
+    let subtitle_streams = probe_subtitle_streams(input_file); // Assuming this is defined elsewhere
+
+    // FALLBACK LOGIC: If no subtitles exist in the file, use Whisper.cpp
     if subtitle_streams.is_empty() {
-        return Vec::new();
+        println!("No built-in subtitles found. Falling back to Whisper.cpp on http://whisper:8080...");
+        return generate_whisper_vtt(input_file, output_dir);
     }
 
     // Create captions directory
@@ -753,12 +757,10 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
     let mut saved_files: Vec<String> = Vec::new();
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Precompute per-stream output file paths and names (so we can build a single ffmpeg invocation)
+    // Precompute per-stream output file paths and names
     let mut outputs: Vec<(u32, String, String, String, String)> = Vec::new();
-    // (subtitle_stream_index, final_name, output_file, language, title)
 
     for (stream_idx, language, title, codec) in subtitle_streams {
-        // Determine the best filename for this subtitle
         let base_name = if !language.is_empty() {
             sanitize_filename(&language)
         } else if !title.is_empty() {
@@ -767,7 +769,6 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
             format!("subtitle_{}", stream_idx)
         };
 
-        // Ensure filename is unique
         let mut final_name = base_name.clone();
         let mut counter = 1;
         while used_names.contains(&final_name) || final_name.is_empty() {
@@ -793,50 +794,34 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
     // Build a single ffmpeg invocation that extracts all subtitle streams at once.
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-nostdin")
-        .arg("-v")
-        .arg("error")
-        .arg("-i")
-        .arg(input_file);
+        .arg("-v").arg("error")
+        .arg("-i").arg(input_file);
 
     for (stream_idx, _final_name, output_file, _language, _title) in &outputs {
-        // `stream_idx` here is the absolute input stream index (as in `0:3`, `0:4`, ...),
-        // not the Nth subtitle stream. So we must map using `0:{idx}`, not `0:s:{n}`.
-        cmd.arg("-map")
-            .arg(format!("0:{}", stream_idx))
-            .arg("-c:s")
-            .arg("webvtt")
+        cmd.arg("-map").arg(format!("0:{}", stream_idx))
+            .arg("-c:s").arg("webvtt")
             .arg(output_file);
     }
 
     cmd.arg("-y");
 
-    println!(
-        "Extracting {} subtitle stream(s) to VTT in a single ffmpeg invocation",
-        outputs.len()
-    );
-
+    println!("Extracting {} subtitle stream(s) to VTT...", outputs.len());
     let result = cmd.output();
 
     match result {
         Ok(output) => {
             if output.status.success() {
-                // Validate each expected output file and keep only non-empty ones
                 for (_stream_idx, final_name, output_file, _language, _title) in outputs {
                     match fs::metadata(&output_file) {
                         Ok(metadata) if metadata.len() > 0 => {
                             saved_files.push(final_name);
                         }
-                        _ => {
-                            // Remove empty or missing file (best effort)
-                            let _ = fs::remove_file(&output_file);
-                        }
+                        _ => { let _ = fs::remove_file(&output_file); }
                     }
                 }
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 println!("Failed to extract subtitles to VTT: {}", stderr);
-
-                // Clean up any partial files (best effort)
                 for (_stream_idx, _final_name, output_file, _language, _title) in outputs {
                     let _ = fs::remove_file(&output_file);
                 }
@@ -844,30 +829,97 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
         }
         Err(e) => {
             println!("Error executing ffmpeg for subtitle extraction: {}", e);
-
-            // Clean up any partial files (best effort)
             for (_stream_idx, _final_name, output_file, _language, _title) in outputs {
                 let _ = fs::remove_file(&output_file);
             }
         }
     }
 
-    // Create list.txt with subtitle filenames (without .vtt extension)
+    create_list_txt(&captions_dir, &saved_files);
+    saved_files
+}
+
+/// Helper function to generate subtitles using Whisper.cpp API
+fn generate_whisper_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
+    let captions_dir = format!("{}/captions", output_dir);
+    fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
+
+    let temp_audio = format!("{}/temp_audio.wav", captions_dir);
+
+    // 1. Extract audio to 16kHz mono WAV (required by Whisper)
+    println!("Extracting audio for Whisper...");
+    let audio_cmd = Command::new("ffmpeg")
+        .arg("-nostdin")
+        .arg("-v").arg("error")
+        .arg("-i").arg(input_file)
+        .arg("-ar").arg("16000")
+        .arg("-ac").arg("1")
+        .arg("-c:a").arg("pcm_s16le")
+        .arg("-y")
+        .arg(&temp_audio)
+        .output();
+
+    if let Err(e) = audio_cmd {
+        println!("Failed to extract audio for Whisper: {}", e);
+        return Vec::new();
+    }
+
+    // 2. Send the audio to the Whisper.cpp server
+    println!("Sending audio to Whisper.cpp API...");
+    let client = Client::new();
+
+    let form = match multipart::Form::new()
+        .text("response_format", "vtt")
+        .text("model", "whisper-1")
+        .file("file", &temp_audio)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            println!("Failed to read audio file for upload: {}", e);
+            let _ = fs::remove_file(&temp_audio);
+            return Vec::new();
+        }
+    };
+
+    let response = client.post("http://whisper:8080/v1/audio/transcriptions")
+        .multipart(form)
+        .send();
+
+    let mut saved_files = Vec::new();
+
+    match response {
+        Ok(res) if res.status().is_success() => {
+            if let Ok(vtt_content) = res.text() {
+                let final_name = "AI_transcription".to_string();
+                let output_file = format!("{}/{}.vtt", captions_dir, final_name);
+
+                if fs::write(&output_file, vtt_content).is_ok() {
+                    println!("Successfully generated VTT via Whisper.cpp.");
+                    saved_files.push(final_name);
+                }
+            }
+        }
+        Ok(res) => println!("Whisper API returned an error: {}", res.status()),
+        Err(e) => println!("Failed to connect to Whisper API: {}", e),
+    }
+
+    // 3. Clean up the temporary WAV file and create list.txt
+    let _ = fs::remove_file(&temp_audio);
+    create_list_txt(&captions_dir, &saved_files);
+
+    saved_files
+}
+
+fn create_list_txt(captions_dir: &str, saved_files: &[String]) {
     if !saved_files.is_empty() {
         let list_file_path = format!("{}/list.txt", captions_dir);
         let content = saved_files.join("\n");
         if let Err(e) = fs::write(&list_file_path, content) {
             println!("Failed to create list.txt: {}", e);
         } else {
-            println!(
-                "Created list.txt with {} subtitle entries: {:?}",
-                saved_files.len(),
-                saved_files
-            );
+            println!("Created list.txt with {} subtitle entries.", saved_files.len());
         }
     }
-
-    saved_files
 }
 
 fn extract_chapters_to_vtt(input_file: &str, output_dir: &str) {
