@@ -867,7 +867,6 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
 
     // 2. Send the audio to the Whisper.cpp server
     println!("Sending audio to Whisper.cpp API...");
-    let client = Client::new();
 
     let form = match multipart::Form::new()
         .text("response_format", "vtt")
@@ -881,6 +880,11 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
             return Vec::new();
         }
     };
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(3600)) // 1 hour
+        .build()
+        .unwrap();
 
     let response = client.post("http://whisper:8080/inference")
         .multipart(form)
