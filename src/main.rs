@@ -882,7 +882,7 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
         }
     };
 
-    let response = client.post("http://whisper:8080/v1/audio/transcriptions")
+    let response = client.post("http://whisper:8080/inference")
         .multipart(form)
         .send();
 
