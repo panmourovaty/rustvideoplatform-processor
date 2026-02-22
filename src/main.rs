@@ -1038,7 +1038,7 @@ fn transcode_picture(input_file: &str, output_dir: &str) -> Result<(), ffmpeg_ne
 
     // HD thumbnail AVIF with proper aspect ratio
     let thumbnail_cmd = format!(
-            "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf 30 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
+            "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf 28 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
             input_file, thumb_width, thumb_height, output_dir
         );
     println!("Executing: {}", thumbnail_cmd);
