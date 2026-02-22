@@ -53,7 +53,7 @@ struct FfprobeTags {
 struct Config {
     dbconnection: String,
     video: VideoConfig,
-    whisper_url: Option<String>,
+    whisper_url: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -486,7 +486,7 @@ async fn process_video(concept_id: String, pool: PgPool, video_config: VideoConf
     // Extract subtitles before transcoding
     let input_file = format!("upload/{}", concept_id);
     let output_dir = format!("upload/{}_processing", concept_id);
-    extract_subtitles_to_vtt(&input_file, &output_dir);
+    extract_subtitles_to_vtt(&input_file, &output_dir, config);
 
     // Extract chapters if present
     extract_chapters_to_vtt(&input_file, &output_dir);
@@ -542,7 +542,7 @@ async fn process_audio(concept_id: String, pool: PgPool) -> Result<(), String> {
     // Extract subtitles before transcoding (some audio formats can contain lyrics/subtitles)
     let input_file = format!("upload/{}", concept_id);
     let output_dir = format!("upload/{}_processing", concept_id);
-    extract_subtitles_to_vtt(&input_file, &output_dir);
+    extract_subtitles_to_vtt(&input_file, &output_dir, config);
 
     // Extract chapters if present (audiobooks, podcasts, etc.)
     extract_chapters_to_vtt(&input_file, &output_dir);
@@ -742,13 +742,13 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
+fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, config: &Config) -> Vec<String> {
     let subtitle_streams = probe_subtitle_streams(input_file); // Assuming this is defined elsewhere
 
     // FALLBACK LOGIC: If no subtitles exist in the file, use Whisper.cpp
     if subtitle_streams.is_empty() {
         println!("No built-in subtitles found. Falling back to Whisper.cpp on http://whisper:8080...");
-        return generate_whisper_vtt(input_file, output_dir);
+        return generate_whisper_vtt(input_file, output_dir, config);
     }
 
     // Create captions directory
@@ -841,7 +841,7 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
 }
 
 /// Helper function to generate subtitles using Whisper.cpp API
-fn generate_whisper_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
+fn generate_whisper_vtt(input_file: &str, output_dir: &str, config: &Config) -> Vec<String> {
     let captions_dir = format!("{}/captions", output_dir);
     fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
 
@@ -882,7 +882,7 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str) -> Vec<String> {
         }
     };
 
-    let response = client.post("http://whisper:8080/v1/audio/transcriptions")
+    let response = client.post(config.whisper_url)
         .multipart(form)
         .send();
 
