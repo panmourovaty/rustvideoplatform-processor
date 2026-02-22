@@ -2058,22 +2058,14 @@ fn transcode_video(
     }
 
     let dash_output_cmd = format!(
-        "ffmpeg -nostdin -y {} {}{} \
-        -c copy \
-        -f dash \
-        -dash_segment_type \"webm\" \
-        -use_timeline 1 \
-        -use_template 1 \
-        -min_seg_duration 10500 \
+        "ffmpeg -nostdin -y -analyzeduration 10M -probesize 10M {} {}{} \
+        -c copy -map_metadata -1 -f dash -dash_segment_type webm \
+        -use_timeline 1 -use_template 1 -min_seg_duration 10500 \
         -adaptation_sets '{}' \
         -init_seg_name 'init_$RepresentationID$.webm' \
         -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' \
         '{}/video.mpd'",
-        dash_input_cmds,
-        maps,
-        metadata_args,
-        adaptation_sets,
-        dash_output_dir
+        dash_input_cmds, maps, metadata_args, adaptation_sets, dash_output_dir
     );
 
     println!("Executing: {}", dash_output_cmd);
