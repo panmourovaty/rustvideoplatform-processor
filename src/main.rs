@@ -2176,9 +2176,9 @@ fn transcode_video(
         ffmpeg_next::Error::External
     })?;
 
-    let interval_seconds = 10.0; // 10 second intervals for smoother seeking
-    let thumb_width = 160;
-    let thumb_height = 90;
+    let interval_seconds = 5.0; // 10 second intervals for smoother seeking
+    let thumb_width = 640;
+    let thumb_height = 360;
     let max_sprites_per_file = 100;
     let sprites_across = 10; // 10 thumbnails per row in the sprite
 
@@ -2215,7 +2215,7 @@ fn transcode_video(
         );
 
         let sprite_cmd = format!(
-            "ffmpeg -nostdin -y -ss {:.3} -t {:.3} -i '{}' -vf '{}' -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 40 -r 1 -frames:v 1 -update 1 '{}'",
+            "ffmpeg -nostdin -y -ss {:.3} -t {:.3} -i '{}' -vf '{}' -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -q:v 36 -r 1 -frames:v 1 -update 1 '{}'",
             start_time, duration_for_this_file, input_file, tile_filter, sprite_path
         );
 
