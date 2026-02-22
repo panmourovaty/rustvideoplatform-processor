@@ -2053,12 +2053,27 @@ fn transcode_video(
         let output_stream_idx = num_video_outputs + audio_idx;
         if !language.is_empty() {
             metadata_args.push_str(&format!(" -metadata:s:{} language={}", output_stream_idx, language));
+            metadata_args.push_str(&format!(" -metadata:s:{} title=\"{}\"", output_stream_idx, language));
         }
     }
 
     let dash_output_cmd = format!(
-        "ffmpeg -nostdin -y {} {}{} -c copy -f dash -dash_segment_type \"webm\" -use_timeline 1 -use_template 1 -adaptation_sets '{}' -init_seg_name 'init_$RepresentationID$.webm' -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' '{}/video.mpd'",
-        dash_input_cmds, maps, metadata_args, adaptation_sets, dash_output_dir
+        "ffmpeg -nostdin -y {} {}{} \
+        -c copy \
+        -f dash \
+        -dash_segment_type \"webm\" \
+        -use_timeline 1 \
+        -use_template 1 \
+        -min_seg_duration 10500 \
+        -adaptation_sets '{}' \
+        -init_seg_name 'init_$RepresentationID$.webm' \
+        -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' \
+        '{}/video.mpd'",
+        dash_input_cmds,
+        maps,
+        metadata_args,
+        adaptation_sets,
+        dash_output_dir
     );
 
     println!("Executing: {}", dash_output_cmd);
