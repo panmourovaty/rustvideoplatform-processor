@@ -12,6 +12,7 @@ use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::process::Command;
+use reqwest::blocking::{Client, multipart};
 
 #[derive(Deserialize, Debug)]
 struct FfprobeOutput {
