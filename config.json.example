@@ -1,5 +1,33 @@
 {
-    "dbconnection": "postgreqsql://user:password@localhost:5432/database",
+    "dbconnection": "postgresql://user:password@localhost:5432/database",
+
+    "whisper": {
+        "url": "http://whisper:8080/inference",
+        "model": "whisper-1",
+        "response_format": "vtt",
+        "output_label": "AI_transcription"
+    },
+
+    "audio": {
+        "codec": "libopus",
+        "lossless_bitrate": "300k",
+        "lossy_bitrate": "256k",
+        "vbr": "on",
+        "application": "audio",
+        "output_format": "ogg",
+        "lossless_codecs": ["flac", "wav", "pcm_s16le"]
+    },
+
+    "picture": {
+        "crf": 26,
+        "thumbnail_crf": 28,
+        "jpg_quality": 25,
+        "thumbnail_width": 1280,
+        "thumbnail_height": 720,
+        "cover_crf": 26,
+        "cover_thumbnail_crf": 30
+    },
+
     "video": {
         "encoder": "qsv",
         "max_resolution_steps": 4,
@@ -31,6 +59,7 @@
             }
         ],
         "filters": "unsharp=3:3:1.0:3:3:0.0,format=p010le",
+
         "nvenc": {
             "codec": "av1_nvenc",
             "preset": "p7",
@@ -44,13 +73,38 @@
             "codec": "av1_qsv",
             "preset": "veryslow",
             "global_quality": 28,
-            "lookahead": 40,
             "look_ahead_depth": 100
         },
         "vaapi": {
             "codec": "av1_vaapi",
             "quality": 51,
             "compression_ratio": 5
+        },
+
+        "dash": {
+            "audio_codec": "libopus",
+            "audio_vbr": "constrained",
+            "audio_channels": 2,
+            "segment_duration": 10500
+        },
+        "thumbnail": {
+            "width": 1920,
+            "height": 1080
+        },
+        "showcase": {
+            "width": 480,
+            "fps": 2,
+            "max_frames": 60,
+            "quality": 40,
+            "cpu_used": 2
+        },
+        "preview_sprites": {
+            "interval_seconds": 5.0,
+            "thumb_width": 640,
+            "thumb_height": 360,
+            "max_sprites_per_file": 100,
+            "sprites_across": 10,
+            "quality": 36
         }
     }
 }
