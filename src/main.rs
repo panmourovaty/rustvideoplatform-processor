@@ -114,12 +114,6 @@ struct WhisperConfig {
     model: String,
     #[serde(default = "default_whisper_response_format")]
     response_format: String,
-    #[serde(default = "default_whisper_sample_rate")]
-    sample_rate: u32,
-    #[serde(default = "default_whisper_channels")]
-    channels: u32,
-    #[serde(default = "default_whisper_timeout_secs")]
-    timeout_secs: u64,
     #[serde(default = "default_whisper_output_label")]
     output_label: String,
 }
@@ -127,9 +121,6 @@ struct WhisperConfig {
 fn default_whisper_url() -> String { "http://whisper:8080/inference".to_string() }
 fn default_whisper_model() -> String { "whisper-1".to_string() }
 fn default_whisper_response_format() -> String { "vtt".to_string() }
-fn default_whisper_sample_rate() -> u32 { 16000 }
-fn default_whisper_channels() -> u32 { 1 }
-fn default_whisper_timeout_secs() -> u64 { 3600 }
 fn default_whisper_output_label() -> String { "AI_transcription".to_string() }
 
 fn default_whisper_config() -> WhisperConfig {
@@ -137,9 +128,6 @@ fn default_whisper_config() -> WhisperConfig {
         url: default_whisper_url(),
         model: default_whisper_model(),
         response_format: default_whisper_response_format(),
-        sample_rate: default_whisper_sample_rate(),
-        channels: default_whisper_channels(),
-        timeout_secs: default_whisper_timeout_secs(),
         output_label: default_whisper_output_label(),
     }
 }
@@ -1082,6 +1070,30 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
     saved_files
 }
 
+/// Probe audio stream properties (sample_rate, channels, duration) from a media file.
+/// Returns (sample_rate, channels, duration_secs) with fallback defaults if probing fails.
+fn probe_audio_properties(input_file: &str) -> (u32, u32, f64) {
+    let probe_cmd = Command::new("ffprobe")
+        .arg("-v").arg("error")
+        .arg("-select_streams").arg("a:0")
+        .arg("-show_entries").arg("stream=sample_rate,channels:format=duration")
+        .arg("-of").arg("default=noprint_wrappers=1:nokey=1")
+        .arg(input_file)
+        .output();
+
+    match probe_cmd {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.lines().collect();
+            let sample_rate = lines.first().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(16000);
+            let channels = lines.get(1).and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(1);
+            let duration = lines.get(2).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(3600.0);
+            (sample_rate, channels, duration)
+        }
+        _ => (16000, 1, 3600.0)
+    }
+}
+
 /// Helper function to generate subtitles using Whisper.cpp API
 fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig) -> Vec<String> {
     let captions_dir = format!("{}/captions", output_dir);
@@ -1089,14 +1101,18 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
 
     let temp_audio = format!("{}/temp_audio.wav", captions_dir);
 
-    // 1. Extract audio to WAV (required by Whisper)
-    println!("Extracting audio for Whisper ({}Hz, {} channel(s))...", whisper_config.sample_rate, whisper_config.channels);
+    // Probe source audio properties
+    let (sample_rate, channels, duration) = probe_audio_properties(input_file);
+    let timeout_secs = (duration * 2.0).ceil() as u64;
+
+    // 1. Extract audio to WAV (required by Whisper), preserving source sample rate and channels
+    println!("Extracting audio for Whisper ({}Hz, {} channel(s))...", sample_rate, channels);
     let audio_cmd = Command::new("ffmpeg")
         .arg("-nostdin")
         .arg("-v").arg("error")
         .arg("-i").arg(input_file)
-        .arg("-ar").arg(whisper_config.sample_rate.to_string())
-        .arg("-ac").arg(whisper_config.channels.to_string())
+        .arg("-ar").arg(sample_rate.to_string())
+        .arg("-ac").arg(channels.to_string())
         .arg("-c:a").arg("pcm_s16le")
         .arg("-y")
         .arg(&temp_audio)
@@ -1108,7 +1124,7 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
     }
 
     // 2. Send the audio to the Whisper.cpp server
-    println!("Sending audio to Whisper.cpp API at {}...", whisper_config.url);
+    println!("Sending audio to Whisper.cpp API at {} (timeout: {}s)...", whisper_config.url, timeout_secs);
 
     let form = match multipart::Form::new()
         .text("response_format", whisper_config.response_format.clone())
@@ -1124,7 +1140,7 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
     };
 
     let client = Client::builder()
-        .timeout(Duration::from_secs(whisper_config.timeout_secs))
+        .timeout(Duration::from_secs(timeout_secs))
         .build()
         .unwrap();
 
