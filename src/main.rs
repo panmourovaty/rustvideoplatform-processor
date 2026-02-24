@@ -2069,12 +2069,12 @@ fn transcode_video(
         config.max_resolution_steps.saturating_sub(1)
     };
 
-    // Apply 2K audio bitrate bonus once (not per quality step)
+    // Apply 2K audio bitrate bonus for DASH audio transcoding
     if num_steps >= config.max_resolution_steps {
         audio_bitrate += config.audio_bitrate_2k_bonus;
     }
 
-    // Save the best audio bitrate for separate DASH audio transcoding
+    // Audio is transcoded once separately for DASH, not per video quality level
     let dash_audio_bitrate = audio_bitrate;
 
     let epsilon = 0.01; // Allow for tiny rounding variances
@@ -2086,8 +2086,8 @@ fn transcode_video(
         let ratio_diff = (current_ratio - aspect_ratio).abs();
 
         if ratio_diff <= epsilon {
-            if !outputs.iter().any(|(w, h, _, _)| *w == width && *h == height) {
-                outputs.push((width, height, step.label.clone(), audio_bitrate));
+            if !outputs.iter().any(|(w, h, _)| *w == width && *h == height) {
+                outputs.push((width, height, step.label.clone()));
             }
         } else {
             println!("Skipping {}x{} due to ratio mismatch", width, height);
@@ -2106,11 +2106,9 @@ fn transcode_video(
 
         width = new_width;
         height = new_height;
-
-        audio_bitrate = (audio_bitrate / step.audio_bitrate_divisor).max(64);
     }
 
-    println!("Generated {} quality outputs: {:?}", outputs.len(), outputs.iter().map(|(_, _, label, _)| label.clone()).collect::<Vec<_>>());
+    println!("Generated {} quality outputs: {:?}", outputs.len(), outputs.iter().map(|(_, _, label)| label.clone()).collect::<Vec<_>>());
 
     let mut webm_files = Vec::new();
     let dash_output_dir = format!("{}/video", output_dir);
@@ -2121,12 +2119,8 @@ fn transcode_video(
     // Build encoder-specific ffmpeg parameters
     let (hwaccel_args, codec_params, tonemap_filter, encoder_type) = build_encoder_params(config, framerate, &hdr_info);
 
-    // Build audio params string from config
-    let dash_audio_params = format!("-c:a {} -vbr {} -ac {}",
-        config.dash.audio_codec, config.dash.audio_vbr, config.dash.audio_channels);
-
-    // Transcode each quality level separately (more reliable with hardware encoders)
-    for (w, h, label, audio_bitrate) in &outputs {
+    // Transcode each quality level separately (video-only; audio is transcoded once separately for DASH)
+    for (w, h, label) in &outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
 
@@ -2139,14 +2133,11 @@ fn transcode_video(
                         "ffmpeg -nostdin -y {} -i '{}' \
                          -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' \
                          {} -pix_fmt p010le \
-                         {} -b:a {}k \
-                         -f webm '{}'",
+                         -an -f webm '{}'",
                         hwaccel_args,
                         input_file,
                         w, h,
                         codec_params,
-                        dash_audio_params,
-                        audio_bitrate,
                         output_file
                     )
                 } else {
@@ -2154,14 +2145,11 @@ fn transcode_video(
                         "ffmpeg -nostdin -y {} -i '{}' \
                          -vf 'vpp_qsv=w={}:h={}:format=p010le' \
                          {} -pix_fmt p010le \
-                         {} -b:a {}k \
-                         -f webm '{}'",
+                         -an -f webm '{}'",
                         hwaccel_args,
                         input_file,
                         w, h,
                         codec_params,
-                        dash_audio_params,
-                        audio_bitrate,
                         output_file
                     )
                 }
@@ -2175,13 +2163,13 @@ fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease:finterp=true", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -nostdin -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i '{}' -vf '{}' {} {} -b:a {}k -f webm '{}'",
-                        input_file, filter_chain, codec_params, dash_audio_params, audio_bitrate, output_file
+                        "ffmpeg -nostdin -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i '{}' -vf '{}' {} -an -f webm '{}'",
+                        input_file, filter_chain, codec_params, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} {} -b:a {}k -f webm '{}'",
-                        hwaccel_args, input_file, w, h, codec_params, dash_audio_params, audio_bitrate, output_file
+                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -an -f webm '{}'",
+                        hwaccel_args, input_file, w, h, codec_params, output_file
                     )
                 }
             }
@@ -2194,13 +2182,13 @@ fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -nostdin -y -vaapi_device /dev/dri/renderD128 -i '{}' -vf '{}' {} {} -b:a {}k -f webm '{}'",
-                        input_file, filter_chain, codec_params, dash_audio_params, audio_bitrate, output_file
+                        "ffmpeg -nostdin -y -vaapi_device /dev/dri/renderD128 -i '{}' -vf '{}' {} -an -f webm '{}'",
+                        input_file, filter_chain, codec_params, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} {} -b:a {}k -f webm '{}'",
-                        hwaccel_args, input_file, w, h, codec_params, dash_audio_params, audio_bitrate, output_file
+                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -an -f webm '{}'",
+                        hwaccel_args, input_file, w, h, codec_params, output_file
                     )
                 }
             }
@@ -2283,10 +2271,9 @@ fn transcode_video(
         maps.push_str(&format!(" -map {}:a:0", num_video_files + audio_idx));
     }
 
-    // Fallback: if no separate audio files, map audio from first video file
-    if audio_webm_files.is_empty() {
-        maps.push_str(" -map 0:a?");
-    }
+    // No fallback needed: video files are video-only (-an), audio is always
+    // transcoded separately via transcode_audio_streams_for_dash(). If no audio
+    // streams exist in the source, the DASH manifest will simply have no audio.
 
     // Build adaptation sets: one for video, one per audio language
     // Output stream indices: 0..num_video-1 are video, num_video..num_video+num_audio-1 are audio
