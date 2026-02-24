@@ -1129,8 +1129,123 @@ fn probe_audio_duration(input_file: &str) -> f64 {
     }
 }
 
-/// Maximum chunk duration in seconds for Whisper transcription (30 minutes).
-const WHISPER_CHUNK_DURATION_SECS: f64 = 1800.0;
+/// Target chunk duration in seconds for Whisper transcription (10 minutes).
+/// Chunks will be split at silence boundaries near this target.
+const WHISPER_TARGET_CHUNK_SECS: f64 = 600.0;
+
+/// Maximum chunk duration in seconds for Whisper transcription (15 minutes).
+/// If no silence is found by the target duration, extend up to this limit.
+const WHISPER_MAX_CHUNK_SECS: f64 = 900.0;
+
+/// Represents a detected silence interval in the audio.
+#[derive(Debug, Clone)]
+struct SilenceInterval {
+    start: f64,
+    end: f64,
+}
+
+impl SilenceInterval {
+    fn midpoint(&self) -> f64 {
+        (self.start + self.end) / 2.0
+    }
+}
+
+/// Detect silence intervals in an audio file using FFmpeg's silencedetect filter.
+/// Returns a sorted list of silence intervals (start, end) in seconds.
+/// Uses -30dB noise threshold and minimum silence duration of 0.5 seconds.
+fn detect_silence(input_file: &str) -> Vec<SilenceInterval> {
+    let result = Command::new("ffmpeg")
+        .arg("-nostdin")
+        .arg("-v").arg("info")
+        .arg("-i").arg(input_file)
+        .arg("-af").arg("silencedetect=noise=-30dB:d=0.5")
+        .arg("-f").arg("null")
+        .arg("-")
+        .output();
+
+    let output = match result {
+        Ok(o) => o,
+        Err(e) => {
+            println!("Failed to run FFmpeg silencedetect: {}", e);
+            return Vec::new();
+        }
+    };
+
+    // silencedetect writes to stderr
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut intervals = Vec::new();
+    let mut current_start: Option<f64> = None;
+
+    for line in stderr.lines() {
+        if line.contains("silence_start:") {
+            // Format: [silencedetect @ ...] silence_start: 123.456
+            if let Some(val) = line.split("silence_start:").nth(1) {
+                if let Ok(s) = val.trim().parse::<f64>() {
+                    current_start = Some(s);
+                }
+            }
+        } else if line.contains("silence_end:") {
+            // Format: [silencedetect @ ...] silence_end: 125.789 | silence_duration: 2.333
+            if let Some(val) = line.split("silence_end:").nth(1) {
+                // Take just the number before the pipe
+                let end_str = val.split('|').next().unwrap_or("").trim();
+                if let Ok(e) = end_str.parse::<f64>() {
+                    if let Some(s) = current_start.take() {
+                        intervals.push(SilenceInterval { start: s, end: e });
+                    }
+                }
+            }
+        }
+    }
+
+    intervals
+}
+
+/// Compute split points for audio based on silence intervals.
+/// Targets chunks of ~WHISPER_TARGET_CHUNK_SECS (10 min), extending up to
+/// WHISPER_MAX_CHUNK_SECS (15 min) if no silence is found at the target boundary.
+/// Returns a list of split times (in seconds) where the audio should be cut.
+fn compute_split_points(duration: f64, silences: &[SilenceInterval]) -> Vec<f64> {
+    let mut split_points: Vec<f64> = Vec::new();
+    let mut current_pos = 0.0;
+
+    while current_pos + WHISPER_TARGET_CHUNK_SECS < duration {
+        let target = current_pos + WHISPER_TARGET_CHUNK_SECS;
+        let max_end = current_pos + WHISPER_MAX_CHUNK_SECS;
+
+        // Find the best silence interval to split at.
+        // Prefer silences closest to the target duration but within the max window.
+        // Search window: from (target - 60s) to max_end for a silence boundary.
+        let search_start = (target - 60.0).max(current_pos + 60.0);
+        let search_end = max_end.min(duration);
+
+        let best_silence = silences.iter()
+            .filter(|s| s.midpoint() >= search_start && s.midpoint() <= search_end)
+            .min_by(|a, b| {
+                let dist_a = (a.midpoint() - target).abs();
+                let dist_b = (b.midpoint() - target).abs();
+                dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+        let split_at = if let Some(silence) = best_silence {
+            silence.midpoint()
+        } else {
+            // No silence found in window; force split at max to avoid cutting speech
+            // at an arbitrary point, but we have no better option.
+            max_end.min(duration)
+        };
+
+        // Don't add a split point if it's very close to the end of the audio
+        if duration - split_at < 30.0 {
+            break;
+        }
+
+        split_points.push(split_at);
+        current_pos = split_at;
+    }
+
+    split_points
+}
 
 /// Parse a VTT timestamp (HH:MM:SS.mmm) into total seconds.
 fn parse_vtt_timestamp(ts: &str) -> Option<f64> {
@@ -1209,32 +1324,54 @@ fn whisper_transcribe_file(audio_path: &str, whisper_config: &WhisperConfig, tim
 
 /// Helper function to generate subtitles using Whisper.cpp API.
 /// Audio is optimized for whisper.cpp (16 kHz, mono, PCM_s16le).
-/// Files longer than 30 minutes are split into chunks and transcribed individually.
+/// Long files are split at silence boundaries with a target of 10 minutes per chunk
+/// and a maximum of 15 minutes to avoid cutting through speech.
 fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig) -> Vec<String> {
     let captions_dir = format!("{}/captions", output_dir);
     fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
 
     let duration = probe_audio_duration(input_file);
 
-    // 1. Extract audio optimized for whisper.cpp: 16 kHz, mono, 16-bit PCM
-    if duration > WHISPER_CHUNK_DURATION_SECS {
-        // Long audio: split into 30-minute chunks directly with ffmpeg
-        let num_chunks = (duration / WHISPER_CHUNK_DURATION_SECS).ceil() as u32;
+    if duration > WHISPER_TARGET_CHUNK_SECS {
+        // Long audio: detect silence and split at silence boundaries
         println!(
-            "Audio duration {:.0}s exceeds 30 min limit. Splitting into {} chunks for Whisper (16kHz, mono, PCM_s16le)...",
-            duration, num_chunks
+            "Audio duration {:.0}s exceeds {} min target. Detecting silence for smart splitting...",
+            duration, (WHISPER_TARGET_CHUNK_SECS / 60.0) as u32
         );
 
-        let mut chunk_files: Vec<String> = Vec::new();
-        for i in 0..num_chunks {
-            let start = i as f64 * WHISPER_CHUNK_DURATION_SECS;
+        let silences = detect_silence(input_file);
+        println!("Detected {} silence intervals.", silences.len());
+
+        let split_points = compute_split_points(duration, &silences);
+
+        // Build chunk boundaries: [(start, end), ...]
+        let mut boundaries: Vec<(f64, f64)> = Vec::new();
+        let mut prev = 0.0;
+        for &sp in &split_points {
+            boundaries.push((prev, sp));
+            prev = sp;
+        }
+        boundaries.push((prev, duration));
+
+        println!(
+            "Splitting into {} chunks for Whisper (16kHz, mono, PCM_s16le)...",
+            boundaries.len()
+        );
+        for (i, (start, end)) in boundaries.iter().enumerate() {
+            println!("  Chunk {}: {:.1}s - {:.1}s ({:.1}s)", i + 1, start, end, end - start);
+        }
+
+        // Extract each chunk as a WAV file
+        let mut chunk_files: Vec<(String, f64)> = Vec::new(); // (path, offset_secs)
+        for (i, (start, end)) in boundaries.iter().enumerate() {
+            let chunk_duration = end - start;
             let chunk_path = format!("{}/whisper_chunk_{}.wav", captions_dir, i);
             let result = Command::new("ffmpeg")
                 .arg("-nostdin")
                 .arg("-v").arg("error")
                 .arg("-i").arg(input_file)
                 .arg("-ss").arg(format!("{:.3}", start))
-                .arg("-t").arg(format!("{:.3}", WHISPER_CHUNK_DURATION_SECS))
+                .arg("-t").arg(format!("{:.3}", chunk_duration))
                 .arg("-ar").arg("16000")
                 .arg("-ac").arg("1")
                 .arg("-c:a").arg("pcm_s16le")
@@ -1242,12 +1379,12 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
                 .arg(&chunk_path)
                 .output();
             match result {
-                Ok(output) if output.status.success() => chunk_files.push(chunk_path),
+                Ok(output) if output.status.success() => chunk_files.push((chunk_path, *start)),
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    println!("Failed to extract chunk {}: {}", i, stderr);
+                    println!("Failed to extract chunk {}: {}", i + 1, stderr);
                 }
-                Err(e) => println!("Failed to run ffmpeg for chunk {}: {}", i, e),
+                Err(e) => println!("Failed to run ffmpeg for chunk {}: {}", i + 1, e),
             }
         }
 
@@ -1256,23 +1393,22 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             return Vec::new();
         }
 
-        // 2. Transcribe each chunk and merge VTT results
+        // Transcribe each chunk and merge VTT results
         let mut merged_vtt = String::from("WEBVTT\n\n");
         let mut any_success = false;
-        let chunk_timeout = (WHISPER_CHUNK_DURATION_SECS * 2.0).ceil() as u64;
 
-        for (i, chunk_path) in chunk_files.iter().enumerate() {
-            let offset_secs = i as f64 * WHISPER_CHUNK_DURATION_SECS;
+        for (i, (chunk_path, offset_secs)) in chunk_files.iter().enumerate() {
+            let chunk_duration = boundaries[i].1 - boundaries[i].0;
+            let chunk_timeout = (chunk_duration * 2.0).ceil() as u64;
             println!(
-                "Transcribing chunk {}/{} (offset {:.0}s) via Whisper.cpp at {}...",
-                i + 1, chunk_files.len(), offset_secs, whisper_config.url
+                "Transcribing chunk {}/{} (offset {:.0}s, duration {:.0}s) via Whisper.cpp at {}...",
+                i + 1, chunk_files.len(), offset_secs, chunk_duration, whisper_config.url
             );
 
             if let Some(vtt_text) = whisper_transcribe_file(chunk_path, whisper_config, chunk_timeout) {
-                // Strip the "WEBVTT" header from each chunk and offset timestamps
                 let body = vtt_text.trim_start_matches("WEBVTT").trim_start();
                 if !body.is_empty() {
-                    let offset_body = offset_vtt(body, offset_secs);
+                    let offset_body = offset_vtt(body, *offset_secs);
                     merged_vtt.push_str(&offset_body);
                     if !merged_vtt.ends_with('\n') {
                         merged_vtt.push('\n');
@@ -1285,8 +1421,8 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             }
         }
 
-        // 3. Clean up chunk files
-        for chunk_path in &chunk_files {
+        // Clean up chunk files
+        for (chunk_path, _) in &chunk_files {
             let _ = fs::remove_file(chunk_path);
         }
 
@@ -1295,14 +1431,14 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             let final_name = whisper_config.output_label.clone();
             let output_file = format!("{}/{}.vtt", captions_dir, final_name);
             if fs::write(&output_file, &merged_vtt).is_ok() {
-                println!("Successfully generated merged VTT via Whisper.cpp ({} chunks).", chunk_files.len());
+                println!("Successfully generated merged VTT via Whisper.cpp ({} chunks, silence-based splitting).", chunk_files.len());
                 saved_files.push(final_name);
             }
         }
         create_list_txt(&captions_dir, &saved_files);
         saved_files
     } else {
-        // Short audio: single-file path (optimized format)
+        // Short audio (under target chunk size): single-file path
         let temp_audio = format!("{}/temp_audio.wav", captions_dir);
         let timeout_secs = (duration * 2.0).ceil() as u64;
 
@@ -1323,7 +1459,6 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             return Vec::new();
         }
 
-        // Send the audio to the Whisper.cpp server
         println!("Sending audio to Whisper.cpp API at {} (timeout: {}s)...", whisper_config.url, timeout_secs);
 
         let mut saved_files = Vec::new();
@@ -1337,7 +1472,6 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             }
         }
 
-        // Clean up
         let _ = fs::remove_file(&temp_audio);
         create_list_txt(&captions_dir, &saved_files);
         saved_files
