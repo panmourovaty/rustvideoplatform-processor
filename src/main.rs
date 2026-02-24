@@ -117,12 +117,30 @@ struct WhisperConfig {
     response_format: String,
     #[serde(default = "default_whisper_output_label")]
     output_label: String,
+    /// Target chunk duration in seconds (default: 600 = 10 minutes).
+    /// Audio will be split at silence boundaries near this target.
+    #[serde(default = "default_whisper_target_chunk_secs")]
+    target_chunk_secs: f64,
+    /// Maximum chunk duration in seconds (default: 900 = 15 minutes).
+    /// If no silence is found by the target, extend up to this limit.
+    #[serde(default = "default_whisper_max_chunk_secs")]
+    max_chunk_secs: f64,
+    /// Silence detection noise threshold in dB (default: -30).
+    #[serde(default = "default_whisper_silence_noise_db")]
+    silence_noise_db: f64,
+    /// Minimum silence duration in seconds to consider as a split point (default: 0.5).
+    #[serde(default = "default_whisper_silence_min_duration")]
+    silence_min_duration: f64,
 }
 
 fn default_whisper_url() -> String { "http://whisper:8080/inference".to_string() }
 fn default_whisper_model() -> String { "whisper-1".to_string() }
 fn default_whisper_response_format() -> String { "vtt".to_string() }
 fn default_whisper_output_label() -> String { "AI_transcription".to_string() }
+fn default_whisper_target_chunk_secs() -> f64 { 600.0 }
+fn default_whisper_max_chunk_secs() -> f64 { 900.0 }
+fn default_whisper_silence_noise_db() -> f64 { -30.0 }
+fn default_whisper_silence_min_duration() -> f64 { 0.5 }
 
 fn default_whisper_config() -> WhisperConfig {
     WhisperConfig {
@@ -130,6 +148,10 @@ fn default_whisper_config() -> WhisperConfig {
         model: default_whisper_model(),
         response_format: default_whisper_response_format(),
         output_label: default_whisper_output_label(),
+        target_chunk_secs: default_whisper_target_chunk_secs(),
+        max_chunk_secs: default_whisper_max_chunk_secs(),
+        silence_noise_db: default_whisper_silence_noise_db(),
+        silence_min_duration: default_whisper_silence_min_duration(),
     }
 }
 
@@ -1129,14 +1151,6 @@ fn probe_audio_duration(input_file: &str) -> f64 {
     }
 }
 
-/// Target chunk duration in seconds for Whisper transcription (10 minutes).
-/// Chunks will be split at silence boundaries near this target.
-const WHISPER_TARGET_CHUNK_SECS: f64 = 600.0;
-
-/// Maximum chunk duration in seconds for Whisper transcription (15 minutes).
-/// If no silence is found by the target duration, extend up to this limit.
-const WHISPER_MAX_CHUNK_SECS: f64 = 900.0;
-
 /// Represents a detected silence interval in the audio.
 #[derive(Debug, Clone)]
 struct SilenceInterval {
@@ -1152,13 +1166,13 @@ impl SilenceInterval {
 
 /// Detect silence intervals in an audio file using FFmpeg's silencedetect filter.
 /// Returns a sorted list of silence intervals (start, end) in seconds.
-/// Uses -30dB noise threshold and minimum silence duration of 0.5 seconds.
-fn detect_silence(input_file: &str) -> Vec<SilenceInterval> {
+fn detect_silence(input_file: &str, noise_db: f64, min_duration: f64) -> Vec<SilenceInterval> {
+    let filter = format!("silencedetect=noise={}dB:d={}", noise_db, min_duration);
     let result = Command::new("ffmpeg")
         .arg("-nostdin")
         .arg("-v").arg("info")
         .arg("-i").arg(input_file)
-        .arg("-af").arg("silencedetect=noise=-30dB:d=0.5")
+        .arg("-af").arg(&filter)
         .arg("-f").arg("null")
         .arg("-")
         .output();
@@ -1202,16 +1216,16 @@ fn detect_silence(input_file: &str) -> Vec<SilenceInterval> {
 }
 
 /// Compute split points for audio based on silence intervals.
-/// Targets chunks of ~WHISPER_TARGET_CHUNK_SECS (10 min), extending up to
-/// WHISPER_MAX_CHUNK_SECS (15 min) if no silence is found at the target boundary.
+/// Targets chunks of ~target_secs, extending up to max_secs if no silence is
+/// found at the target boundary.
 /// Returns a list of split times (in seconds) where the audio should be cut.
-fn compute_split_points(duration: f64, silences: &[SilenceInterval]) -> Vec<f64> {
+fn compute_split_points(duration: f64, silences: &[SilenceInterval], target_secs: f64, max_secs: f64) -> Vec<f64> {
     let mut split_points: Vec<f64> = Vec::new();
     let mut current_pos = 0.0;
 
-    while current_pos + WHISPER_TARGET_CHUNK_SECS < duration {
-        let target = current_pos + WHISPER_TARGET_CHUNK_SECS;
-        let max_end = current_pos + WHISPER_MAX_CHUNK_SECS;
+    while current_pos + target_secs < duration {
+        let target = current_pos + target_secs;
+        let max_end = current_pos + max_secs;
 
         // Find the best silence interval to split at.
         // Prefer silences closest to the target duration but within the max window.
@@ -1332,17 +1346,20 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
 
     let duration = probe_audio_duration(input_file);
 
-    if duration > WHISPER_TARGET_CHUNK_SECS {
+    let target_chunk = whisper_config.target_chunk_secs;
+    let max_chunk = whisper_config.max_chunk_secs;
+
+    if duration > target_chunk {
         // Long audio: detect silence and split at silence boundaries
         println!(
             "Audio duration {:.0}s exceeds {} min target. Detecting silence for smart splitting...",
-            duration, (WHISPER_TARGET_CHUNK_SECS / 60.0) as u32
+            duration, (target_chunk / 60.0) as u32
         );
 
-        let silences = detect_silence(input_file);
+        let silences = detect_silence(input_file, whisper_config.silence_noise_db, whisper_config.silence_min_duration);
         println!("Detected {} silence intervals.", silences.len());
 
-        let split_points = compute_split_points(duration, &silences);
+        let split_points = compute_split_points(duration, &silences, target_chunk, max_chunk);
 
         // Build chunk boundaries: [(start, end), ...]
         let mut boundaries: Vec<(f64, f64)> = Vec::new();

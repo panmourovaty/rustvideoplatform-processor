@@ -5,7 +5,11 @@
         "url": "http://whisper:8080/inference",
         "model": "whisper-1",
         "response_format": "vtt",
-        "output_label": "AI_transcription"
+        "output_label": "AI_transcription",
+        "target_chunk_secs": 600,
+        "max_chunk_secs": 900,
+        "silence_noise_db": -30,
+        "silence_min_duration": 0.5
     },
 
     "audio": {
