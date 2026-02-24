@@ -712,6 +712,7 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
 
     // Extract subtitles, chapters, and transcode video all in parallel
     let input_file = format!("upload/{}", concept_id);
+    let input_dir = format!("upload/{}", concept_id);
     let output_dir = format!("upload/{}_processing", concept_id);
     let input_file_sub = input_file.clone();
     let output_dir_sub = output_dir.clone();
@@ -726,8 +727,8 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
             extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
         }),
         transcode_video(
-            format!("upload/{}", concept_id).as_str(),
-            format!("upload/{}_processing", concept_id).as_str(),
+            &input_dir,
+            &output_dir,
             &config.video,
         )
     );
@@ -778,6 +779,7 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
 
     // Extract subtitles, chapters, and transcode audio all in parallel
     let input_file = format!("upload/{}", concept_id);
+    let input_dir = format!("upload/{}", concept_id);
     let output_dir = format!("upload/{}_processing", concept_id);
     let input_file_sub = input_file.clone();
     let output_dir_sub = output_dir.clone();
@@ -792,8 +794,8 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
             extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
         }),
         transcode_audio(
-            format!("upload/{}", concept_id).as_str(),
-            format!("upload/{}_processing", concept_id).as_str(),
+            &input_dir,
+            &output_dir,
             audio_config,
             picture_config,
         )
