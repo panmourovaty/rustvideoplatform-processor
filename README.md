@@ -68,7 +68,7 @@ The processor detects the media type of each file and routes it accordingly:
 | **Audio** | Audio stream without real video | Opus transcode, embedded cover art extraction, subtitles/lyrics |
 | **Picture** | Single frame, no audio | AVIF + JPEG thumbnails at configured resolutions |
 
-Subtitle extraction tries embedded streams first, then falls back to Whisper transcription if no subtitles are found.
+Subtitle extraction tries embedded streams first, then falls back to Whisper transcription if no subtitles are found. Long audio is split at silence boundaries (targeting 10-minute chunks, up to 15 minutes) so that Whisper never receives a chunk that cuts through speech.
 
 ## Configuration
 
@@ -92,7 +92,9 @@ PostgreSQL connection string.
 
 ### `whisper`
 
-Whisper.cpp API integration for automatic transcription when no embedded subtitles are found. Audio sample rate and channel count are copied from the source file automatically. The API timeout is calculated as 2x the audio duration.
+Whisper.cpp API integration for automatic transcription when no embedded subtitles are found. Audio is extracted at 16 kHz mono PCM for optimal Whisper input. The API timeout is calculated as 2x the chunk duration.
+
+Long audio files are automatically split into chunks at silence boundaries to avoid cutting through speech. The splitter uses FFmpeg's `silencedetect` filter to find natural pauses, then picks split points closest to the target chunk duration. If no silence is found near the target, the chunk extends up to the maximum duration before forcing a split.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -100,6 +102,10 @@ Whisper.cpp API integration for automatic transcription when no embedded subtitl
 | `model` | `whisper-1` | Model name sent to the API |
 | `response_format` | `vtt` | Subtitle format (`vtt`) |
 | `output_label` | `AI_transcription` | Filename label for generated subtitles |
+| `target_chunk_secs` | `600` (10 min) | Target chunk duration in seconds. Splits aim for a silence boundary near this point |
+| `max_chunk_secs` | `900` (15 min) | Maximum chunk duration in seconds. If no silence is found by the target, extend up to this limit |
+| `silence_noise_db` | `-30` | Noise floor threshold in dB for silence detection (lower = stricter) |
+| `silence_min_duration` | `0.5` | Minimum silence gap in seconds to be considered a valid split candidate |
 
 ### `audio`
 
