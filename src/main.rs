@@ -710,30 +710,28 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
-    // Extract subtitles and chapters in parallel before transcoding
+    // Extract subtitles, chapters, and transcode video all in parallel
     let input_file = format!("upload/{}", concept_id);
     let output_dir = format!("upload/{}_processing", concept_id);
-    {
-        let input_file_sub = input_file.clone();
-        let output_dir_sub = output_dir.clone();
-        let whisper_config = config.whisper.clone();
-        let input_file_chap = input_file.clone();
-        let output_dir_chap = output_dir.clone();
-        let (_, _) = tokio::join!(
-            task::spawn_blocking(move || {
-                extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config);
-            }),
-            task::spawn_blocking(move || {
-                extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
-            })
-        );
-    }
-
-    let transcode_result = transcode_video(
-        format!("upload/{}", concept_id).as_str(),
-        format!("upload/{}_processing", concept_id).as_str(),
-        &config.video,
-    ).await;
+    let input_file_sub = input_file.clone();
+    let output_dir_sub = output_dir.clone();
+    let whisper_config = config.whisper.clone();
+    let input_file_chap = input_file.clone();
+    let output_dir_chap = output_dir.clone();
+    let (_, _, transcode_result) = tokio::join!(
+        task::spawn_blocking(move || {
+            extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config);
+        }),
+        task::spawn_blocking(move || {
+            extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
+        }),
+        transcode_video(
+            format!("upload/{}", concept_id).as_str(),
+            format!("upload/{}_processing", concept_id).as_str(),
+            &config.video,
+        )
+    );
+    let transcode_result: Result<(), String> = transcode_result.map_err(|e| format!("{}", e));
     match transcode_result {
         Ok(()) => {
             sqlx::query!(
@@ -778,31 +776,29 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
-    // Extract subtitles and chapters in parallel before transcoding
+    // Extract subtitles, chapters, and transcode audio all in parallel
     let input_file = format!("upload/{}", concept_id);
     let output_dir = format!("upload/{}_processing", concept_id);
-    {
-        let input_file_sub = input_file.clone();
-        let output_dir_sub = output_dir.clone();
-        let whisper_config = whisper_config.clone();
-        let input_file_chap = input_file.clone();
-        let output_dir_chap = output_dir.clone();
-        let (_, _) = tokio::join!(
-            task::spawn_blocking(move || {
-                extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config);
-            }),
-            task::spawn_blocking(move || {
-                extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
-            })
-        );
-    }
-
-    let transcode_result = transcode_audio(
-        format!("upload/{}", concept_id).as_str(),
-        format!("upload/{}_processing", concept_id).as_str(),
-        audio_config,
-        picture_config,
-    ).await;
+    let input_file_sub = input_file.clone();
+    let output_dir_sub = output_dir.clone();
+    let whisper_config = whisper_config.clone();
+    let input_file_chap = input_file.clone();
+    let output_dir_chap = output_dir.clone();
+    let (_, _, transcode_result) = tokio::join!(
+        task::spawn_blocking(move || {
+            extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config);
+        }),
+        task::spawn_blocking(move || {
+            extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
+        }),
+        transcode_audio(
+            format!("upload/{}", concept_id).as_str(),
+            format!("upload/{}_processing", concept_id).as_str(),
+            audio_config,
+            picture_config,
+        )
+    );
+    let transcode_result: Result<(), String> = transcode_result.map_err(|e| format!("{}", e));
     match transcode_result {
         Ok(()) => {
             sqlx::query!(
