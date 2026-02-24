@@ -14,6 +14,7 @@ use sqlx::PgPool;
 use std::process::Command;
 use std::time::Duration;
 use reqwest::blocking::{Client, multipart};
+use tokio::task;
 
 #[derive(Deserialize, Debug)]
 struct FfprobeOutput {
@@ -709,19 +710,30 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
-    // Extract subtitles before transcoding
+    // Extract subtitles and chapters in parallel before transcoding
     let input_file = format!("upload/{}", concept_id);
     let output_dir = format!("upload/{}_processing", concept_id);
-    extract_subtitles_to_vtt(&input_file, &output_dir, &config.whisper);
-
-    // Extract chapters if present
-    extract_chapters_to_vtt(&input_file, &output_dir);
+    {
+        let input_file_sub = input_file.clone();
+        let output_dir_sub = output_dir.clone();
+        let whisper_config = config.whisper.clone();
+        let input_file_chap = input_file.clone();
+        let output_dir_chap = output_dir.clone();
+        let (_, _) = tokio::join!(
+            task::spawn_blocking(move || {
+                extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config);
+            }),
+            task::spawn_blocking(move || {
+                extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
+            })
+        );
+    }
 
     let transcode_result = transcode_video(
         format!("upload/{}", concept_id).as_str(),
         format!("upload/{}_processing", concept_id).as_str(),
         &config.video,
-    );
+    ).await;
     match transcode_result {
         Ok(()) => {
             sqlx::query!(
@@ -745,7 +757,7 @@ async fn process_picture(concept_id: String, pool: PgPool, picture_config: &Pict
         format!("upload/{}", concept_id).as_str(),
         format!("upload/{}_processing", concept_id).as_str(),
         picture_config,
-    );
+    ).await;
     match transcode_result {
         Ok(()) => {
             sqlx::query!(
@@ -766,20 +778,31 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
-    // Extract subtitles before transcoding (some audio formats can contain lyrics/subtitles)
+    // Extract subtitles and chapters in parallel before transcoding
     let input_file = format!("upload/{}", concept_id);
     let output_dir = format!("upload/{}_processing", concept_id);
-    extract_subtitles_to_vtt(&input_file, &output_dir, whisper_config);
-
-    // Extract chapters if present (audiobooks, podcasts, etc.)
-    extract_chapters_to_vtt(&input_file, &output_dir);
+    {
+        let input_file_sub = input_file.clone();
+        let output_dir_sub = output_dir.clone();
+        let whisper_config = whisper_config.clone();
+        let input_file_chap = input_file.clone();
+        let output_dir_chap = output_dir.clone();
+        let (_, _) = tokio::join!(
+            task::spawn_blocking(move || {
+                extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config);
+            }),
+            task::spawn_blocking(move || {
+                extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
+            })
+        );
+    }
 
     let transcode_result = transcode_audio(
         format!("upload/{}", concept_id).as_str(),
         format!("upload/{}_processing", concept_id).as_str(),
         audio_config,
         picture_config,
-    );
+    ).await;
     match transcode_result {
         Ok(()) => {
             sqlx::query!(
@@ -905,7 +928,7 @@ fn probe_audio_streams(input_file: &str) -> Vec<(u32, String, String, String)> {
     result
 }
 
-fn transcode_audio_streams_for_dash(
+async fn transcode_audio_streams_for_dash(
     input_file: &str,
     output_dir: &str,
     audio_bitrate: u32,
@@ -913,7 +936,8 @@ fn transcode_audio_streams_for_dash(
     dash_config: &DashConfig,
 ) -> Vec<(String, String, String)> {
     // Returns Vec of (file_path, language, title) for successfully transcoded audio streams
-    let mut result = Vec::new();
+    // Transcode all audio streams in parallel
+    let mut handles = Vec::new();
 
     for (audio_idx, (_stream_index, language, title, _codec)) in audio_streams.iter().enumerate() {
         let output_file = format!("{}/audio_stream_{}.webm", output_dir, audio_idx);
@@ -933,32 +957,47 @@ fn transcode_audio_streams_for_dash(
 
         cmd.push_str(&format!(" -f webm '{}'", output_file));
 
-        println!("Executing: {}", cmd);
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .status();
+        let language_owned = language.clone();
+        let title_owned = title.clone();
+        let output_file_owned = output_file.clone();
+        handles.push(task::spawn_blocking(move || {
+            println!("Executing: {}", cmd);
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .status();
+            (status, audio_idx, output_file_owned, language_owned, title_owned)
+        }));
+    }
 
-        match status {
-            Ok(s) if s.success() => {
-                println!(
-                    "Generated audio stream {}: {} (language: {}, title: {})",
-                    audio_idx,
-                    output_file,
-                    if language.is_empty() { "und" } else { language },
-                    if title.is_empty() { "none" } else { title }
-                );
-                result.push((output_file, language.clone(), title.clone()));
-            }
-            Ok(s) => {
-                eprintln!(
-                    "Failed to transcode audio stream {} with exit code: {:?}",
-                    audio_idx,
-                    s.code()
-                );
-            }
+    // Collect results from all parallel audio transcodes
+    let mut result = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok((status, audio_idx, output_file, language, title)) => match status {
+                Ok(s) if s.success() => {
+                    println!(
+                        "Generated audio stream {}: {} (language: {}, title: {})",
+                        audio_idx,
+                        output_file,
+                        if language.is_empty() { "und" } else { &language },
+                        if title.is_empty() { "none" } else { &title }
+                    );
+                    result.push((output_file, language, title));
+                }
+                Ok(s) => {
+                    eprintln!(
+                        "Failed to transcode audio stream {} with exit code: {:?}",
+                        audio_idx,
+                        s.code()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Failed to execute ffmpeg for audio stream {}: {}", audio_idx, e);
+                }
+            },
             Err(e) => {
-                eprintln!("Failed to execute ffmpeg for audio stream {}: {}", audio_idx, e);
+                eprintln!("Audio transcode task panicked: {}", e);
             }
         }
     }
@@ -1265,7 +1304,7 @@ fn extract_chapters_to_vtt(input_file: &str, output_dir: &str) {
     }
 }
 
-fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &PictureConfig) -> Result<(), ffmpeg_next::Error> {
+async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &PictureConfig) -> Result<(), ffmpeg_next::Error> {
     // Get image dimensions
     let probe_cmd = format!(
         "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 '{}'",
@@ -1282,52 +1321,56 @@ fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &Pictur
     // Calculate scaled dimensions for HD thumbnail (closest to target while maintaining aspect ratio)
     let (thumb_width, thumb_height) = calculate_hd_scale(orig_width, orig_height, picture_config.thumbnail_width, picture_config.thumbnail_height);
 
-    // Full resolution AVIF
+    // Run all three picture transcodes in parallel
     let transcode_cmd = format!(
         "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
         input_file, picture_config.crf, output_dir
     );
-    println!("Executing: {}", transcode_cmd);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(transcode_cmd)
-        .status()
-        .map_err(|_| ffmpeg_next::Error::External)?;
-    if !status.success() {
-        eprintln!("Failed to transcode picture to AVIF");
-        return Err(ffmpeg_next::Error::External);
-    }
-
-    // HD thumbnail AVIF with proper aspect ratio
     let thumbnail_cmd = format!(
             "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
             input_file, picture_config.thumbnail_crf, thumb_width, thumb_height, output_dir
         );
-    println!("Executing: {}", thumbnail_cmd);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(thumbnail_cmd)
-        .status()
-        .map_err(|_| ffmpeg_next::Error::External)?;
-    if !status.success() {
-        eprintln!("Failed to transcode picture thumbnail AVIF");
-        return Err(ffmpeg_next::Error::External);
-    }
-
-    // HD thumbnail JPG for older devices
     let thumbnail_ogp_cmd = format!(
         "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
         input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
-    println!("Executing: {}", thumbnail_ogp_cmd);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(thumbnail_ogp_cmd)
-        .status()
-        .map_err(|_| ffmpeg_next::Error::External)?;
-    if !status.success() {
-        eprintln!("Failed to transcode picture thumbnail JPG");
-        return Err(ffmpeg_next::Error::External);
+
+    let (r1, r2, r3) = tokio::join!(
+        task::spawn_blocking(move || {
+            println!("Executing: {}", transcode_cmd);
+            Command::new("sh").arg("-c").arg(&transcode_cmd).status()
+        }),
+        task::spawn_blocking(move || {
+            println!("Executing: {}", thumbnail_cmd);
+            Command::new("sh").arg("-c").arg(&thumbnail_cmd).status()
+        }),
+        task::spawn_blocking(move || {
+            println!("Executing: {}", thumbnail_ogp_cmd);
+            Command::new("sh").arg("-c").arg(&thumbnail_ogp_cmd).status()
+        })
+    );
+
+    // Check results
+    match r1 {
+        Ok(Ok(s)) if s.success() => {}
+        _ => {
+            eprintln!("Failed to transcode picture to AVIF");
+            return Err(ffmpeg_next::Error::External);
+        }
+    }
+    match r2 {
+        Ok(Ok(s)) if s.success() => {}
+        _ => {
+            eprintln!("Failed to transcode picture thumbnail AVIF");
+            return Err(ffmpeg_next::Error::External);
+        }
+    }
+    match r3 {
+        Ok(Ok(s)) if s.success() => {}
+        _ => {
+            eprintln!("Failed to transcode picture thumbnail JPG");
+            return Err(ffmpeg_next::Error::External);
+        }
     }
 
     Ok(())
@@ -1506,7 +1549,7 @@ fn get_audio_codec_for_stream(input_file: &str, stream_idx: u32) -> String {
     }
 }
 
-fn extract_secondary_video_as_cover(
+async fn extract_secondary_video_as_cover(
     input_file: &str,
     output_dir: &str,
     picture_config: &PictureConfig,
@@ -1547,43 +1590,39 @@ fn extract_secondary_video_as_cover(
     let video_count = count_video_streams(input_file);
     let stream_selector = if video_count > 1 { "v:1" } else { "v:0" };
 
-    // Extract full resolution cover
+    // Run all three cover extractions in parallel
     let cover_cmd = format!(
         "ffmpeg -nostdin -y -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
         input_file, stream_selector, picture_config.cover_crf, output_dir
     );
-    println!("Executing: {}", cover_cmd);
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(&cover_cmd)
-        .status();
-
-    // Create thumbnail AVIF
     let thumbnail_cmd = format!(
         "ffmpeg -nostdin -y -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
         input_file, stream_selector, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, output_dir
     );
-    println!("Executing: {}", thumbnail_cmd);
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(&thumbnail_cmd)
-        .status();
-
-    // Create thumbnail JPG for older devices
     let thumbnail_jpg_cmd = format!(
         "ffmpeg -nostdin -y -i '{}' -map 0:{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
         input_file, stream_selector, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
-    println!("Executing: {}", thumbnail_jpg_cmd);
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(&thumbnail_jpg_cmd)
-        .status();
+
+    let (_, _, _) = tokio::join!(
+        task::spawn_blocking(move || {
+            println!("Executing: {}", cover_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&cover_cmd).status();
+        }),
+        task::spawn_blocking(move || {
+            println!("Executing: {}", thumbnail_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&thumbnail_cmd).status();
+        }),
+        task::spawn_blocking(move || {
+            println!("Executing: {}", thumbnail_jpg_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&thumbnail_jpg_cmd).status();
+        })
+    );
 
     Ok(())
 }
 
-fn extract_album_cover(input_file: &str, output_dir: &str, picture_config: &PictureConfig) -> Result<(), ffmpeg_next::Error> {
+async fn extract_album_cover(input_file: &str, output_dir: &str, picture_config: &PictureConfig) -> Result<(), ffmpeg_next::Error> {
     // Get album cover dimensions
     let probe_cmd = format!(
         "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 '{}'",
@@ -1600,43 +1639,39 @@ fn extract_album_cover(input_file: &str, output_dir: &str, picture_config: &Pict
     // Calculate scaled dimensions for HD thumbnail
     let (thumb_width, thumb_height) = calculate_hd_scale(orig_width, orig_height, picture_config.thumbnail_width, picture_config.thumbnail_height);
 
-    // Extract full resolution album cover
+    // Run all three cover extractions in parallel
     let cover_cmd = format!(
         "ffmpeg -nostdin -y -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
         input_file, picture_config.cover_crf, output_dir
     );
-    println!("Executing: {}", cover_cmd);
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(&cover_cmd)
-        .status();
-
-    // Create thumbnail AVIF
     let thumbnail_cmd = format!(
         "ffmpeg -nostdin -y -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
         input_file, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, output_dir
     );
-    println!("Executing: {}", thumbnail_cmd);
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(&thumbnail_cmd)
-        .status();
-
-    // Create thumbnail JPG for older devices
     let thumbnail_jpg_cmd = format!(
         "ffmpeg -nostdin -y -i '{}' -map 0:v:0 -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
         input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
-    println!("Executing: {}", thumbnail_jpg_cmd);
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(&thumbnail_jpg_cmd)
-        .status();
+
+    let (_, _, _) = tokio::join!(
+        task::spawn_blocking(move || {
+            println!("Executing: {}", cover_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&cover_cmd).status();
+        }),
+        task::spawn_blocking(move || {
+            println!("Executing: {}", thumbnail_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&thumbnail_cmd).status();
+        }),
+        task::spawn_blocking(move || {
+            println!("Executing: {}", thumbnail_jpg_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&thumbnail_jpg_cmd).status();
+        })
+    );
 
     Ok(())
 }
 
-fn transcode_audio(input_file: &str, output_dir: &str, audio_config: &AudioTranscodeConfig, picture_config: &PictureConfig) -> Result<(), ffmpeg_next::Error> {
+async fn transcode_audio(input_file: &str, output_dir: &str, audio_config: &AudioTranscodeConfig, picture_config: &PictureConfig) -> Result<(), ffmpeg_next::Error> {
     // Detect source codec to determine bitrate
     let source_codec = get_audio_codec(input_file);
     println!("Detected audio codec: {}", source_codec);
@@ -1656,28 +1691,47 @@ fn transcode_audio(input_file: &str, output_dir: &str, audio_config: &AudioTrans
         "ffmpeg -nostdin -y -i '{}' -map 0:a:0 -c:a {} -b:a {} -vbr {} -application {} '{}'",
         input_file, audio_config.codec, bitrate, audio_config.vbr, audio_config.application, output_path
     );
-    println!("Executing: {}", transcode_cmd);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(&transcode_cmd)
-        .status()
-        .map_err(|_| ffmpeg_next::Error::External)?;
+    let transcode_cmd_owned = transcode_cmd.clone();
+    let status = task::spawn_blocking(move || {
+        println!("Executing: {}", transcode_cmd_owned);
+        Command::new("sh")
+            .arg("-c")
+            .arg(&transcode_cmd_owned)
+            .status()
+    }).await.map_err(|_| ffmpeg_next::Error::External)?.map_err(|_| ffmpeg_next::Error::External)?;
     if !status.success() {
         eprintln!("Failed to transcode audio to Opus");
         return Err(ffmpeg_next::Error::External);
     }
 
-    // Extract additional audio streams if present
+    // Extract additional audio streams and album cover in parallel
     let audio_stream_count = count_audio_streams(input_file);
+    let has_video = has_video_stream(input_file);
+
+    let mut handles: Vec<task::JoinHandle<()>> = Vec::new();
+
     if audio_stream_count > 1 {
         println!("Found {} audio streams, extracting additional streams...", audio_stream_count);
-        let _ = extract_additional_audio(input_file, output_dir, audio_config);
+        let input_owned = input_file.to_string();
+        let output_owned = output_dir.to_string();
+        let audio_config_owned = audio_config.clone();
+        handles.push(task::spawn_blocking(move || {
+            let _ = extract_additional_audio(&input_owned, &output_owned, &audio_config_owned);
+        }));
     }
 
-    // Check if audio file has embedded album cover (video stream)
-    if has_video_stream(input_file) {
+    if has_video {
         println!("Found album cover in audio file, extracting...");
-        let _ = extract_album_cover(input_file, output_dir, picture_config);
+        let input_owned = input_file.to_string();
+        let output_owned = output_dir.to_string();
+        let picture_config_owned = picture_config.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = extract_album_cover(&input_owned, &output_owned, &picture_config_owned).await;
+        }));
+    }
+
+    for handle in handles {
+        let _ = handle.await;
     }
 
     Ok(())
@@ -2017,7 +2071,7 @@ fn post_process_dash_manifest(
     }
 }
 
-fn transcode_video(
+async fn transcode_video(
     input_file: &str,
     output_dir: &str,
     config: &VideoConfig,
@@ -2119,7 +2173,8 @@ fn transcode_video(
     // Build encoder-specific ffmpeg parameters
     let (hwaccel_args, codec_params, tonemap_filter, encoder_type) = build_encoder_params(config, framerate, &hdr_info);
 
-    // Transcode each quality level separately (video-only; audio is transcoded once separately for DASH)
+    // Transcode each quality level in parallel (video-only; audio is transcoded once separately for DASH)
+    let mut transcode_handles = Vec::new();
     for (w, h, label) in &outputs {
         let output_file = format!("{}/output_{}.webm", output_dir, label);
         webm_files.push(output_file.clone());
@@ -2194,21 +2249,34 @@ fn transcode_video(
             }
         };
 
-        println!("Executing: {}", cmd);
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .status();
+        let label_owned = label.clone();
+        let output_file_owned = output_file.clone();
+        transcode_handles.push(task::spawn_blocking(move || {
+            println!("Executing: {}", cmd);
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .status();
+            (status, label_owned, output_file_owned)
+        }));
+    }
 
-        match status {
-            Ok(status) if status.success() => {
-                println!("Generated: {}", output_file);
-            }
-            Ok(status) => {
-                eprintln!("FFmpeg failed with exit code: {:?} for {}", status.code(), label);
-            }
+    // Wait for all quality transcodes to complete in parallel
+    for handle in transcode_handles {
+        match handle.await {
+            Ok((status, label, output_file)) => match status {
+                Ok(s) if s.success() => {
+                    println!("Generated: {}", output_file);
+                }
+                Ok(s) => {
+                    eprintln!("FFmpeg failed with exit code: {:?} for {}", s.code(), label);
+                }
+                Err(e) => {
+                    eprintln!("Failed to execute ffmpeg for {}: {}", label, e);
+                }
+            },
             Err(e) => {
-                eprintln!("Failed to execute ffmpeg for {}: {}", label, e);
+                eprintln!("Transcode task panicked: {}", e);
             }
         }
     }
@@ -2237,7 +2305,7 @@ fn transcode_video(
     );
 
     let audio_webm_files = if !audio_streams.is_empty() {
-        transcode_audio_streams_for_dash(input_file, output_dir, dash_audio_bitrate, &audio_streams, &config.dash)
+        transcode_audio_streams_for_dash(input_file, output_dir, dash_audio_bitrate, &audio_streams, &config.dash).await
     } else {
         Vec::new()
     };
@@ -2374,7 +2442,7 @@ fn transcode_video(
         }
     }
 
-    // Generate thumbnails
+    // Generate thumbnails, showcase, and preview sprites all in parallel
     let random_time = if duration > 0.1 {
         rand::rng().random_range(0.0..duration)
     } else {
@@ -2382,53 +2450,7 @@ fn transcode_video(
     };
     println!("thumbnail selected time: {:.2} seconds", random_time);
 
-    // Generate JPG thumbnail (maintain aspect ratio)
-    let thumbnail_jpg_cmd = format!(
-        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 '{}/thumbnail.jpg'",
-        random_time, input_file, config.thumbnail.width, config.thumbnail.height, output_dir
-    );
-    println!("Executing: {}", thumbnail_jpg_cmd);
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(&thumbnail_jpg_cmd)
-        .status();
-
-    // Generate AVIF thumbnail (maintain aspect ratio)
-    let thumbnail_avif_cmd = format!(
-        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -update 1 '{}/thumbnail.avif'",
-        random_time, input_file, config.thumbnail.width, config.thumbnail.height, output_dir
-    );
-    println!("Executing: {}", thumbnail_avif_cmd);
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(&thumbnail_avif_cmd)
-        .status();
-
-    // Generate animated showcase.avif
-    println!("Generating showcase.avif...");
-    let showcase_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:-2,fps={},format=yuv420p10le' -frames:v {} -c:v libaom-av1 -pix_fmt yuv420p10le -q:v {} -cpu-used {} -row-mt 1 '{}/showcase.avif'",
-        input_file, config.showcase.width, config.showcase.fps, config.showcase.max_frames, config.showcase.quality, config.showcase.cpu_used, output_dir
-    );
-    println!("Executing: {}", showcase_cmd);
-    let showcase_status = Command::new("sh").arg("-c").arg(&showcase_cmd).status();
-
-    match showcase_status {
-        Ok(status) if status.success() => {
-            println!(" showcase.avif generated successfully");
-        }
-        Ok(status) => {
-            eprintln!(
-                "Warning: showcase.avif generation failed with exit code: {:?}",
-                status.code()
-            );
-        }
-        Err(e) => {
-            eprintln!("Warning: Failed to execute showcase command: {}", e);
-        }
-    }
-
-    // Generate thumbnail sprites for vidstack.io
+    // Create preview output directory before spawning sprite tasks
     let preview_output_dir = format!("{}/previews", output_dir);
     fs::create_dir_all(&preview_output_dir).map_err(|e| {
         eprintln!("Failed to create preview output directory: {}", e);
@@ -2454,7 +2476,52 @@ fn transcode_video(
         num_sprite_files, num_thumbnails, max_sprites_per_file
     );
 
-    // Generate each sprite file
+    // Spawn all post-processing tasks in parallel: JPG thumbnail, AVIF thumbnail, showcase, and all sprite files
+    let mut post_handles: Vec<task::JoinHandle<()>> = Vec::new();
+
+    // JPG thumbnail
+    let thumbnail_jpg_cmd = format!(
+        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 '{}/thumbnail.jpg'",
+        random_time, input_file, config.thumbnail.width, config.thumbnail.height, output_dir
+    );
+    post_handles.push(task::spawn_blocking(move || {
+        println!("Executing: {}", thumbnail_jpg_cmd);
+        let _ = Command::new("sh").arg("-c").arg(&thumbnail_jpg_cmd).status();
+    }));
+
+    // AVIF thumbnail
+    let thumbnail_avif_cmd = format!(
+        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -update 1 '{}/thumbnail.avif'",
+        random_time, input_file, config.thumbnail.width, config.thumbnail.height, output_dir
+    );
+    post_handles.push(task::spawn_blocking(move || {
+        println!("Executing: {}", thumbnail_avif_cmd);
+        let _ = Command::new("sh").arg("-c").arg(&thumbnail_avif_cmd).status();
+    }));
+
+    // Animated showcase.avif
+    let showcase_cmd = format!(
+        "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:-2,fps={},format=yuv420p10le' -frames:v {} -c:v libaom-av1 -pix_fmt yuv420p10le -q:v {} -cpu-used {} -row-mt 1 '{}/showcase.avif'",
+        input_file, config.showcase.width, config.showcase.fps, config.showcase.max_frames, config.showcase.quality, config.showcase.cpu_used, output_dir
+    );
+    post_handles.push(task::spawn_blocking(move || {
+        println!("Generating showcase.avif...");
+        println!("Executing: {}", showcase_cmd);
+        let showcase_status = Command::new("sh").arg("-c").arg(&showcase_cmd).status();
+        match showcase_status {
+            Ok(status) if status.success() => {
+                println!("showcase.avif generated successfully");
+            }
+            Ok(status) => {
+                eprintln!("Warning: showcase.avif generation failed with exit code: {:?}", status.code());
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to execute showcase command: {}", e);
+            }
+        }
+    }));
+
+    // All sprite files in parallel
     for sprite_idx in 0..num_sprite_files {
         let start_thumb_idx = sprite_idx * max_sprites_per_file;
         let end_thumb_idx = ((start_thumb_idx + max_sprites_per_file).min(num_thumbnails)) as u32;
@@ -2478,27 +2545,26 @@ fn transcode_video(
             start_time, duration_for_this_file, input_file, tile_filter, config.preview_sprites.quality, sprite_path
         );
 
-        println!("Executing sprite {}: {}", sprite_idx, sprite_cmd);
-        let sprite_status = Command::new("sh").arg("-c").arg(&sprite_cmd).status();
+        post_handles.push(task::spawn_blocking(move || {
+            println!("Executing sprite {}: {}", sprite_idx, sprite_cmd);
+            let sprite_status = Command::new("sh").arg("-c").arg(&sprite_cmd).status();
+            match sprite_status {
+                Ok(status) if status.success() => {
+                    println!("Sprite {} generated successfully", sprite_idx);
+                }
+                Ok(status) => {
+                    eprintln!("Warning: Sprite {} generation failed with exit code: {:?}", sprite_idx, status.code());
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to execute sprite {} command: {}", sprite_idx, e);
+                }
+            }
+        }));
+    }
 
-        match sprite_status {
-            Ok(status) if status.success() => {
-                println!("Sprite {} generated successfully", sprite_idx);
-            }
-            Ok(status) => {
-                eprintln!(
-                    "Warning: Sprite {} generation failed with exit code: {:?}",
-                    sprite_idx,
-                    status.code()
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to execute sprite {} command: {}",
-                    sprite_idx, e
-                );
-            }
-        }
+    // Wait for all post-processing tasks to complete
+    for handle in post_handles {
+        let _ = handle.await;
     }
 
     // Generate WebVTT file with sprite coordinates
