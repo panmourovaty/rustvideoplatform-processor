@@ -1107,13 +1107,13 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
     saved_files
 }
 
-/// Probe audio stream properties (sample_rate, channels, duration) from a media file.
-/// Returns (sample_rate, channels, duration_secs) with fallback defaults if probing fails.
-fn probe_audio_properties(input_file: &str) -> (u32, u32, f64) {
+/// Probe audio duration from a media file.
+/// Returns duration in seconds, with a fallback default if probing fails.
+fn probe_audio_duration(input_file: &str) -> f64 {
     let probe_cmd = Command::new("ffprobe")
         .arg("-v").arg("error")
         .arg("-select_streams").arg("a:0")
-        .arg("-show_entries").arg("stream=sample_rate,channels:format=duration")
+        .arg("-show_entries").arg("format=duration")
         .arg("-of").arg("default=noprint_wrappers=1:nokey=1")
         .arg(input_file)
         .output();
@@ -1121,58 +1121,71 @@ fn probe_audio_properties(input_file: &str) -> (u32, u32, f64) {
     match probe_cmd {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let lines: Vec<&str> = stdout.lines().collect();
-            let sample_rate = lines.first().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(16000);
-            let channels = lines.get(1).and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(1);
-            let duration = lines.get(2).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(3600.0);
-            (sample_rate, channels, duration)
+            stdout.lines().next()
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .unwrap_or(3600.0)
         }
-        _ => (16000, 1, 3600.0)
+        _ => 3600.0
     }
 }
 
-/// Helper function to generate subtitles using Whisper.cpp API
-fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig) -> Vec<String> {
-    let captions_dir = format!("{}/captions", output_dir);
-    fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
+/// Maximum chunk duration in seconds for Whisper transcription (30 minutes).
+const WHISPER_CHUNK_DURATION_SECS: f64 = 1800.0;
 
-    let temp_audio = format!("{}/temp_audio.wav", captions_dir);
+/// Parse a VTT timestamp (HH:MM:SS.mmm) into total seconds.
+fn parse_vtt_timestamp(ts: &str) -> Option<f64> {
+    let parts: Vec<&str> = ts.split(':').collect();
+    if parts.len() != 3 { return None; }
+    let hours: f64 = parts[0].trim().parse().ok()?;
+    let minutes: f64 = parts[1].trim().parse().ok()?;
+    let seconds: f64 = parts[2].trim().parse().ok()?;
+    Some(hours * 3600.0 + minutes * 60.0 + seconds)
+}
 
-    // Probe source audio properties
-    let (sample_rate, channels, duration) = probe_audio_properties(input_file);
-    let timeout_secs = (duration * 2.0).ceil() as u64;
+/// Format seconds back into VTT timestamp (HH:MM:SS.mmm).
+fn format_vtt_timestamp(total_secs: f64) -> String {
+    let total_secs = if total_secs < 0.0 { 0.0 } else { total_secs };
+    let hours = (total_secs / 3600.0).floor() as u32;
+    let minutes = ((total_secs % 3600.0) / 60.0).floor() as u32;
+    let seconds = total_secs % 60.0;
+    format!("{:02}:{:02}:{:06.3}", hours, minutes, seconds)
+}
 
-    // 1. Extract audio to WAV (required by Whisper), preserving source sample rate and channels
-    println!("Extracting audio for Whisper ({}Hz, {} channel(s))...", sample_rate, channels);
-    let audio_cmd = Command::new("ffmpeg")
-        .arg("-nostdin")
-        .arg("-v").arg("error")
-        .arg("-i").arg(input_file)
-        .arg("-ar").arg(sample_rate.to_string())
-        .arg("-ac").arg(channels.to_string())
-        .arg("-c:a").arg("pcm_s16le")
-        .arg("-y")
-        .arg(&temp_audio)
-        .output();
-
-    if let Err(e) = audio_cmd {
-        println!("Failed to extract audio for Whisper: {}", e);
-        return Vec::new();
+/// Offset all timestamps in a VTT string by the given number of seconds.
+/// Skips the WEBVTT header and any cue identifiers; only adjusts "HH:MM:SS.mmm --> HH:MM:SS.mmm" lines.
+fn offset_vtt(vtt: &str, offset_secs: f64) -> String {
+    let mut out = String::with_capacity(vtt.len());
+    for line in vtt.lines() {
+        if line.contains(" --> ") {
+            // Timestamp line: "00:01:23.456 --> 00:01:27.890"
+            let parts: Vec<&str> = line.splitn(2, " --> ").collect();
+            if parts.len() == 2 {
+                if let (Some(start), Some(end)) = (parse_vtt_timestamp(parts[0]), parse_vtt_timestamp(parts[1])) {
+                    out.push_str(&format_vtt_timestamp(start + offset_secs));
+                    out.push_str(" --> ");
+                    out.push_str(&format_vtt_timestamp(end + offset_secs));
+                    out.push('\n');
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
     }
+    out
+}
 
-    // 2. Send the audio to the Whisper.cpp server
-    println!("Sending audio to Whisper.cpp API at {} (timeout: {}s)...", whisper_config.url, timeout_secs);
-
+/// Send a single audio file to the Whisper.cpp server and return the VTT text.
+fn whisper_transcribe_file(audio_path: &str, whisper_config: &WhisperConfig, timeout_secs: u64) -> Option<String> {
     let form = match multipart::Form::new()
         .text("response_format", whisper_config.response_format.clone())
         .text("model", whisper_config.model.clone())
-        .file("file", &temp_audio)
+        .file("file", audio_path)
     {
         Ok(f) => f,
         Err(e) => {
             println!("Failed to read audio file for upload: {}", e);
-            let _ = fs::remove_file(&temp_audio);
-            return Vec::new();
+            return None;
         }
     };
 
@@ -1181,33 +1194,154 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
         .build()
         .unwrap();
 
-    let response = client.post(&whisper_config.url)
-        .multipart(form)
-        .send();
+    match client.post(&whisper_config.url).multipart(form).send() {
+        Ok(res) if res.status().is_success() => res.text().ok(),
+        Ok(res) => {
+            println!("Whisper API returned an error: {}", res.status());
+            None
+        }
+        Err(e) => {
+            println!("Failed to connect to Whisper API: {}", e);
+            None
+        }
+    }
+}
 
-    let mut saved_files = Vec::new();
+/// Helper function to generate subtitles using Whisper.cpp API.
+/// Audio is optimized for whisper.cpp (16 kHz, mono, PCM_s16le).
+/// Files longer than 30 minutes are split into chunks and transcribed individually.
+fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig) -> Vec<String> {
+    let captions_dir = format!("{}/captions", output_dir);
+    fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
 
-    match response {
-        Ok(res) if res.status().is_success() => {
-            if let Ok(vtt_content) = res.text() {
-                let final_name = whisper_config.output_label.clone();
-                let output_file = format!("{}/{}.vtt", captions_dir, final_name);
+    let duration = probe_audio_duration(input_file);
 
-                if fs::write(&output_file, vtt_content).is_ok() {
-                    println!("Successfully generated VTT via Whisper.cpp.");
-                    saved_files.push(final_name);
+    // 1. Extract audio optimized for whisper.cpp: 16 kHz, mono, 16-bit PCM
+    if duration > WHISPER_CHUNK_DURATION_SECS {
+        // Long audio: split into 30-minute chunks directly with ffmpeg
+        let num_chunks = (duration / WHISPER_CHUNK_DURATION_SECS).ceil() as u32;
+        println!(
+            "Audio duration {:.0}s exceeds 30 min limit. Splitting into {} chunks for Whisper (16kHz, mono, PCM_s16le)...",
+            duration, num_chunks
+        );
+
+        let mut chunk_files: Vec<String> = Vec::new();
+        for i in 0..num_chunks {
+            let start = i as f64 * WHISPER_CHUNK_DURATION_SECS;
+            let chunk_path = format!("{}/whisper_chunk_{}.wav", captions_dir, i);
+            let result = Command::new("ffmpeg")
+                .arg("-nostdin")
+                .arg("-v").arg("error")
+                .arg("-i").arg(input_file)
+                .arg("-ss").arg(format!("{:.3}", start))
+                .arg("-t").arg(format!("{:.3}", WHISPER_CHUNK_DURATION_SECS))
+                .arg("-ar").arg("16000")
+                .arg("-ac").arg("1")
+                .arg("-c:a").arg("pcm_s16le")
+                .arg("-y")
+                .arg(&chunk_path)
+                .output();
+            match result {
+                Ok(output) if output.status.success() => chunk_files.push(chunk_path),
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("Failed to extract chunk {}: {}", i, stderr);
                 }
+                Err(e) => println!("Failed to run ffmpeg for chunk {}: {}", i, e),
             }
         }
-        Ok(res) => println!("Whisper API returned an error: {}", res.status()),
-        Err(e) => println!("Failed to connect to Whisper API: {}", e),
+
+        if chunk_files.is_empty() {
+            println!("Failed to extract any audio chunks for Whisper.");
+            return Vec::new();
+        }
+
+        // 2. Transcribe each chunk and merge VTT results
+        let mut merged_vtt = String::from("WEBVTT\n\n");
+        let mut any_success = false;
+        let chunk_timeout = (WHISPER_CHUNK_DURATION_SECS * 2.0).ceil() as u64;
+
+        for (i, chunk_path) in chunk_files.iter().enumerate() {
+            let offset_secs = i as f64 * WHISPER_CHUNK_DURATION_SECS;
+            println!(
+                "Transcribing chunk {}/{} (offset {:.0}s) via Whisper.cpp at {}...",
+                i + 1, chunk_files.len(), offset_secs, whisper_config.url
+            );
+
+            if let Some(vtt_text) = whisper_transcribe_file(chunk_path, whisper_config, chunk_timeout) {
+                // Strip the "WEBVTT" header from each chunk and offset timestamps
+                let body = vtt_text.trim_start_matches("WEBVTT").trim_start();
+                if !body.is_empty() {
+                    let offset_body = offset_vtt(body, offset_secs);
+                    merged_vtt.push_str(&offset_body);
+                    if !merged_vtt.ends_with('\n') {
+                        merged_vtt.push('\n');
+                    }
+                    merged_vtt.push('\n');
+                    any_success = true;
+                }
+            } else {
+                println!("Warning: failed to transcribe chunk {}, gap in subtitles.", i + 1);
+            }
+        }
+
+        // 3. Clean up chunk files
+        for chunk_path in &chunk_files {
+            let _ = fs::remove_file(chunk_path);
+        }
+
+        let mut saved_files = Vec::new();
+        if any_success {
+            let final_name = whisper_config.output_label.clone();
+            let output_file = format!("{}/{}.vtt", captions_dir, final_name);
+            if fs::write(&output_file, &merged_vtt).is_ok() {
+                println!("Successfully generated merged VTT via Whisper.cpp ({} chunks).", chunk_files.len());
+                saved_files.push(final_name);
+            }
+        }
+        create_list_txt(&captions_dir, &saved_files);
+        saved_files
+    } else {
+        // Short audio: single-file path (optimized format)
+        let temp_audio = format!("{}/temp_audio.wav", captions_dir);
+        let timeout_secs = (duration * 2.0).ceil() as u64;
+
+        println!("Extracting audio for Whisper (16kHz, mono, PCM_s16le)...");
+        let audio_cmd = Command::new("ffmpeg")
+            .arg("-nostdin")
+            .arg("-v").arg("error")
+            .arg("-i").arg(input_file)
+            .arg("-ar").arg("16000")
+            .arg("-ac").arg("1")
+            .arg("-c:a").arg("pcm_s16le")
+            .arg("-y")
+            .arg(&temp_audio)
+            .output();
+
+        if let Err(e) = audio_cmd {
+            println!("Failed to extract audio for Whisper: {}", e);
+            return Vec::new();
+        }
+
+        // Send the audio to the Whisper.cpp server
+        println!("Sending audio to Whisper.cpp API at {} (timeout: {}s)...", whisper_config.url, timeout_secs);
+
+        let mut saved_files = Vec::new();
+
+        if let Some(vtt_content) = whisper_transcribe_file(&temp_audio, whisper_config, timeout_secs) {
+            let final_name = whisper_config.output_label.clone();
+            let output_file = format!("{}/{}.vtt", captions_dir, final_name);
+            if fs::write(&output_file, &vtt_content).is_ok() {
+                println!("Successfully generated VTT via Whisper.cpp.");
+                saved_files.push(final_name);
+            }
+        }
+
+        // Clean up
+        let _ = fs::remove_file(&temp_audio);
+        create_list_txt(&captions_dir, &saved_files);
+        saved_files
     }
-
-    // 3. Clean up the temporary WAV file and create list.txt
-    let _ = fs::remove_file(&temp_audio);
-    create_list_txt(&captions_dir, &saved_files);
-
-    saved_files
 }
 
 fn create_list_txt(captions_dir: &str, saved_files: &[String]) {
