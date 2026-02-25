@@ -136,6 +136,9 @@ struct WhisperConfig {
     /// Minimum silence duration in seconds to consider as a split point (default: 0.5).
     #[serde(default = "default_whisper_silence_min_duration")]
     silence_min_duration: f64,
+    /// Maximum number of parallel ffmpeg processes for silence detection (default: 4).
+    #[serde(default = "default_whisper_silence_detect_parallel")]
+    silence_detect_parallel: u32,
 }
 
 fn default_whisper_url() -> String { "http://whisper:8080/inference".to_string() }
@@ -146,6 +149,7 @@ fn default_whisper_target_chunk_secs() -> f64 { 600.0 }
 fn default_whisper_max_chunk_secs() -> f64 { 900.0 }
 fn default_whisper_silence_noise_db() -> f64 { -30.0 }
 fn default_whisper_silence_min_duration() -> f64 { 0.5 }
+fn default_whisper_silence_detect_parallel() -> u32 { 4 }
 
 fn default_whisper_config() -> WhisperConfig {
     WhisperConfig {
@@ -157,6 +161,7 @@ fn default_whisper_config() -> WhisperConfig {
         max_chunk_secs: default_whisper_max_chunk_secs(),
         silence_noise_db: default_whisper_silence_noise_db(),
         silence_min_duration: default_whisper_silence_min_duration(),
+        silence_detect_parallel: default_whisper_silence_detect_parallel(),
     }
 }
 
@@ -1451,6 +1456,7 @@ fn detect_silence_near_splits(
     total_duration: f64,
     target_secs: f64,
     max_secs: f64,
+    parallel_limit: u32,
 ) -> Vec<SilenceInterval> {
     let extra = max_secs - target_secs; // how far past target we might need to search (e.g. 300s)
     let margin = 120.0; // look-back before target to account for accumulated drift
@@ -1492,23 +1498,28 @@ fn detect_silence_near_splits(
         (total_scan / total_duration) * 100.0
     );
 
-    // Run silence detection in parallel — one thread per window
+    // Run silence detection in parallel, limited to parallel_limit concurrent threads
+    let batch_size = (parallel_limit.max(1)) as usize;
+    println!("Running silence detection with parallel_limit={}", batch_size);
     let input = input_file.to_string();
-    let handles: Vec<_> = merged
-        .into_iter()
-        .map(|(win_start, win_end)| {
-            let input = input.clone();
-            std::thread::spawn(move || {
-                detect_silence_in_range(&input, noise_db, min_duration, win_start, win_end - win_start)
-            })
-        })
-        .collect();
 
     let mut all_silences: Vec<SilenceInterval> = Vec::new();
-    for handle in handles {
-        match handle.join() {
-            Ok(mut silences) => all_silences.append(&mut silences),
-            Err(_) => println!("Warning: silence detection thread panicked"),
+    for batch in merged.chunks(batch_size) {
+        let handles: Vec<_> = batch
+            .iter()
+            .map(|&(win_start, win_end)| {
+                let input = input.clone();
+                std::thread::spawn(move || {
+                    detect_silence_in_range(&input, noise_db, min_duration, win_start, win_end - win_start)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            match handle.join() {
+                Ok(mut silences) => all_silences.append(&mut silences),
+                Err(_) => println!("Warning: silence detection thread panicked"),
+            }
         }
     }
 
@@ -1678,6 +1689,7 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             duration,
             target_chunk,
             max_chunk,
+            whisper_config.silence_detect_parallel,
         );
         println!("Detected {} silence intervals near split boundaries.", silences.len());
 
