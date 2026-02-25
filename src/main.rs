@@ -14,6 +14,8 @@ use sqlx::PgPool;
 use std::process::Command;
 use std::time::Duration;
 use reqwest::blocking::{Client, multipart};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio::task;
 
 #[derive(Deserialize, Debug)]
@@ -295,6 +297,8 @@ struct PreviewSpriteConfig {
     sprites_across: u32,
     #[serde(default = "default_preview_quality")]
     quality: u32,
+    #[serde(default = "default_preview_parallel_limit")]
+    parallel_limit: u32,
 }
 
 fn default_preview_interval_seconds() -> f64 { 5.0 }
@@ -303,6 +307,7 @@ fn default_preview_thumb_height() -> u32 { 360 }
 fn default_preview_max_sprites_per_file() -> u32 { 100 }
 fn default_preview_sprites_across() -> u32 { 10 }
 fn default_preview_quality() -> u32 { 36 }
+fn default_preview_parallel_limit() -> u32 { 4 }
 
 fn default_preview_sprite_config() -> PreviewSpriteConfig {
     PreviewSpriteConfig {
@@ -312,6 +317,7 @@ fn default_preview_sprite_config() -> PreviewSpriteConfig {
         max_sprites_per_file: default_preview_max_sprites_per_file(),
         sprites_across: default_preview_sprites_across(),
         quality: default_preview_quality(),
+        parallel_limit: default_preview_parallel_limit(),
     }
 }
 
@@ -2804,7 +2810,12 @@ async fn transcode_video(
         }
     }));
 
-    // All sprite files in parallel
+    // Sprite files with throttled parallelism
+    let parallel_limit = config.preview_sprites.parallel_limit.max(1) as usize;
+    let semaphore = Arc::new(Semaphore::new(parallel_limit));
+    println!("Generating sprite files with parallel_limit={}", parallel_limit);
+
+    let mut sprite_handles: Vec<task::JoinHandle<()>> = Vec::new();
     for sprite_idx in 0..num_sprite_files {
         let start_thumb_idx = sprite_idx * max_sprites_per_file;
         let end_thumb_idx = ((start_thumb_idx + max_sprites_per_file).min(num_thumbnails)) as u32;
@@ -2828,25 +2839,34 @@ async fn transcode_video(
             start_time, duration_for_this_file, input_file, tile_filter, config.preview_sprites.quality, sprite_path
         );
 
-        post_handles.push(task::spawn_blocking(move || {
-            println!("Executing sprite {}: {}", sprite_idx, sprite_cmd);
-            let sprite_status = Command::new("sh").arg("-c").arg(&sprite_cmd).status();
-            match sprite_status {
-                Ok(status) if status.success() => {
-                    println!("Sprite {} generated successfully", sprite_idx);
+        let permit = Arc::clone(&semaphore);
+        sprite_handles.push(task::spawn(async move {
+            let _permit = permit.acquire().await.expect("semaphore closed");
+            task::spawn_blocking(move || {
+                println!("Executing sprite {}: {}", sprite_idx, sprite_cmd);
+                let sprite_status = Command::new("sh").arg("-c").arg(&sprite_cmd).status();
+                match sprite_status {
+                    Ok(status) if status.success() => {
+                        println!("Sprite {} generated successfully", sprite_idx);
+                    }
+                    Ok(status) => {
+                        eprintln!("Warning: Sprite {} generation failed with exit code: {:?}", sprite_idx, status.code());
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to execute sprite {} command: {}", sprite_idx, e);
+                    }
                 }
-                Ok(status) => {
-                    eprintln!("Warning: Sprite {} generation failed with exit code: {:?}", sprite_idx, status.code());
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to execute sprite {} command: {}", sprite_idx, e);
-                }
-            }
+            }).await.ok();
         }));
     }
 
-    // Wait for all post-processing tasks to complete
+    // Wait for all post-processing tasks to complete (thumbnails + showcase)
     for handle in post_handles {
+        let _ = handle.await;
+    }
+
+    // Wait for all sprite generation tasks to complete
+    for handle in sprite_handles {
         let _ = handle.await;
     }
 

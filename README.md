@@ -246,6 +246,7 @@ Thumbnail sprite sheets for seek preview.
 | `max_sprites_per_file` | `100` | Maximum thumbnails per sprite image |
 | `sprites_across` | `10` | Thumbnails per row in sprite grid |
 | `quality` | `36` | AV1 quality level for sprites |
+| `parallel_limit` | `4` | Maximum number of sprite files generated in parallel |
 
 ## HDR handling
 
