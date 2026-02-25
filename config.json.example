@@ -108,7 +108,8 @@
             "thumb_height": 360,
             "max_sprites_per_file": 100,
             "sprites_across": 10,
-            "quality": 36
+            "quality": 36,
+            "parallel_limit": 4
         }
     }
 }
