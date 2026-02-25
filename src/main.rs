@@ -959,8 +959,7 @@ fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfC
     let bitmap = first_page.render_with_config(&render_config)
         .map_err(|e| format!("Failed to render PDF page: {}", e))?;
 
-    let dynamic_image = bitmap.as_image()
-        .map_err(|e| format!("Failed to convert PDF bitmap to image: {}", e))?;
+    let dynamic_image = bitmap.as_image();
 
     let rgb_image = dynamic_image.into_rgb8();
 
@@ -1022,7 +1021,7 @@ fn extract_pdf_text(input_file: &str, output_dir: &str) -> Result<(), String> {
     let mut all_markdown = String::new();
 
     for page_num in 0..page_count {
-        let page_md = doc.to_markdown(page_num, Default::default())
+        let page_md = doc.to_markdown(page_num, &Default::default())
             .map_err(|e| format!("Failed to extract markdown from page {}: {}", page_num, e))?;
 
         if !page_md.trim().is_empty() {
