@@ -17,6 +17,7 @@ use reqwest::blocking::{Client, multipart};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task;
+use pdfium_render::prelude::*;
 
 #[derive(Deserialize, Debug)]
 struct FfprobeOutput {
@@ -63,6 +64,8 @@ struct Config {
     audio: AudioTranscodeConfig,
     #[serde(default = "default_picture_config")]
     picture: PictureConfig,
+    #[serde(default = "default_pdf_config")]
+    pdf: PdfConfig,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -236,6 +239,36 @@ fn default_picture_config() -> PictureConfig {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+struct PdfConfig {
+    #[serde(default = "default_pdf_thumbnail_width")]
+    thumbnail_width: u32,
+    #[serde(default = "default_pdf_thumbnail_height")]
+    thumbnail_height: u32,
+    #[serde(default = "default_pdf_thumbnail_crf")]
+    thumbnail_crf: u32,
+    #[serde(default = "default_pdf_jpg_quality")]
+    jpg_quality: u32,
+    #[serde(default = "default_pdf_render_width")]
+    render_width: u32,
+}
+
+fn default_pdf_thumbnail_width() -> u32 { 1280 }
+fn default_pdf_thumbnail_height() -> u32 { 720 }
+fn default_pdf_thumbnail_crf() -> u32 { 28 }
+fn default_pdf_jpg_quality() -> u32 { 25 }
+fn default_pdf_render_width() -> u32 { 2000 }
+
+fn default_pdf_config() -> PdfConfig {
+    PdfConfig {
+        thumbnail_width: default_pdf_thumbnail_width(),
+        thumbnail_height: default_pdf_thumbnail_height(),
+        thumbnail_crf: default_pdf_thumbnail_crf(),
+        jpg_quality: default_pdf_jpg_quality(),
+        render_width: default_pdf_render_width(),
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
 struct ThumbnailConfig {
     #[serde(default = "default_thumbnail_width")]
     width: u32,
@@ -388,6 +421,14 @@ async fn main() {
 }
 
 fn detect_file_type(input_file: &str) -> Option<String> {
+    // Check for PDF magic bytes (%PDF)
+    if let Ok(mut file) = std::fs::File::open(input_file) {
+        let mut magic = [0u8; 4];
+        if std::io::Read::read_exact(&mut file, &mut magic).is_ok() && &magic == b"%PDF" {
+            return Some("document_pdf".to_string());
+        }
+    }
+
     // Check for video stream
     let video_probe_cmd = format!(
         "ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 '{}'",
@@ -710,6 +751,11 @@ async fn process(pool: PgPool, config: Config) {
                 process_audio(concept.id.clone(), pool.clone(), &config.audio, &config.whisper, &config.picture)
                     .await
                     .map_err(|e| format!("audio processing failed: {}", e))
+            } else if actual_type == "document_pdf" {
+                println!("processing concept: {} as document_pdf", concept.id);
+                process_document_pdf(concept.id.clone(), pool.clone(), &config.pdf)
+                    .await
+                    .map_err(|e| format!("document_pdf processing failed: {}", e))
             } else {
                 eprintln!(
                     "Unknown media type '{}' for concept {}, marking as processed",
@@ -843,6 +889,156 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
         }
         Err(e) => Err(format!("Audio transcode failed: {}", e)),
     }
+}
+
+async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &PdfConfig) -> Result<(), String> {
+    fs::create_dir_all(format!("upload/{}_processing", &concept_id))
+        .map_err(|e| format!("Failed to create processing directory: {}", e))?;
+
+    let input_file = format!("upload/{}", concept_id);
+    let output_dir = format!("upload/{}_processing", concept_id);
+
+    // Generate thumbnails and extract text in parallel
+    let input_file_thumb = input_file.clone();
+    let output_dir_thumb = output_dir.clone();
+    let pdf_config_clone = pdf_config.clone();
+    let input_file_text = input_file.clone();
+    let output_dir_text = output_dir.clone();
+
+    let (thumb_result, text_result) = tokio::join!(
+        task::spawn_blocking(move || {
+            generate_pdf_thumbnails(&input_file_thumb, &output_dir_thumb, &pdf_config_clone)
+        }),
+        task::spawn_blocking(move || {
+            extract_pdf_text(&input_file_text, &output_dir_text)
+        })
+    );
+
+    let thumb_result = thumb_result.map_err(|e| format!("Thumbnail task panicked: {}", e))?;
+    let text_result = text_result.map_err(|e| format!("Text extraction task panicked: {}", e))?;
+
+    if let Err(e) = &thumb_result {
+        eprintln!("PDF thumbnail generation failed for {}: {}", concept_id, e);
+    }
+    if let Err(e) = &text_result {
+        eprintln!("PDF text extraction failed for {}: {}", concept_id, e);
+    }
+
+    // Require at least thumbnails to succeed
+    thumb_result?;
+
+    sqlx::query!(
+        "UPDATE media_concepts SET processed = true WHERE id = $1;",
+        concept_id
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Database update error: {}", e))?;
+    let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+    Ok(())
+}
+
+fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfConfig) -> Result<(), String> {
+    // Use pdfium-render to render the first page to a temporary PNG
+    let pdfium = Pdfium::default();
+    let document = pdfium.load_pdf_from_file(input_file, None)
+        .map_err(|e| format!("Failed to load PDF with pdfium: {}", e))?;
+
+    let pages = document.pages();
+    if pages.len() == 0 {
+        return Err("PDF has no pages".to_string());
+    }
+
+    let first_page = pages.get(0)
+        .map_err(|e| format!("Failed to get first page: {}", e))?;
+
+    let render_config = PdfRenderConfig::new()
+        .set_target_width(pdf_config.render_width as Pixels)
+        .set_maximum_height((pdf_config.render_width * 3) as Pixels);
+
+    let bitmap = first_page.render_with_config(&render_config)
+        .map_err(|e| format!("Failed to render PDF page: {}", e))?;
+
+    let dynamic_image = bitmap.as_image()
+        .map_err(|e| format!("Failed to convert PDF bitmap to image: {}", e))?;
+
+    let rgb_image = dynamic_image.into_rgb8();
+
+    // Save as temporary PNG for ffmpeg to process
+    let temp_png = format!("{}/temp_page.png", output_dir);
+    rgb_image.save_with_format(&temp_png, image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to save temp PNG: {}", e))?;
+
+    let orig_width = rgb_image.width();
+    let orig_height = rgb_image.height();
+
+    // Calculate thumbnail dimensions maintaining aspect ratio
+    let (thumb_width, thumb_height) = calculate_hd_scale(
+        orig_width, orig_height,
+        pdf_config.thumbnail_width, pdf_config.thumbnail_height,
+    );
+
+    // Generate thumbnail.avif and thumbnail.jpg using ffmpeg (consistent with other pipelines)
+    let avif_cmd = format!(
+        "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
+        temp_png, pdf_config.thumbnail_crf, thumb_width, thumb_height, output_dir
+    );
+    let jpg_cmd = format!(
+        "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
+        temp_png, thumb_width, thumb_height, pdf_config.jpg_quality, output_dir
+    );
+
+    println!("Executing: {}", avif_cmd);
+    let avif_status = Command::new("sh").arg("-c").arg(&avif_cmd).status()
+        .map_err(|e| format!("Failed to execute ffmpeg for AVIF: {}", e))?;
+    if !avif_status.success() {
+        return Err(format!("ffmpeg AVIF thumbnail failed with exit code: {:?}", avif_status.code()));
+    }
+
+    println!("Executing: {}", jpg_cmd);
+    let jpg_status = Command::new("sh").arg("-c").arg(&jpg_cmd).status()
+        .map_err(|e| format!("Failed to execute ffmpeg for JPG: {}", e))?;
+    if !jpg_status.success() {
+        return Err(format!("ffmpeg JPG thumbnail failed with exit code: {:?}", jpg_status.code()));
+    }
+
+    // Clean up temporary PNG
+    let _ = fs::remove_file(&temp_png);
+
+    println!("Generated PDF thumbnails for {}", input_file);
+    Ok(())
+}
+
+fn extract_pdf_text(input_file: &str, output_dir: &str) -> Result<(), String> {
+    let mut doc = pdf_oxide::PdfDocument::open(input_file)
+        .map_err(|e| format!("Failed to open PDF with pdf_oxide: {}", e))?;
+
+    let page_count = doc.page_count()
+        .map_err(|e| format!("Failed to get PDF page count: {}", e))?;
+    if page_count == 0 {
+        return Err("PDF has no pages for text extraction".to_string());
+    }
+
+    let mut all_markdown = String::new();
+
+    for page_num in 0..page_count {
+        let page_md = doc.to_markdown(page_num, Default::default())
+            .map_err(|e| format!("Failed to extract markdown from page {}: {}", page_num, e))?;
+
+        if !page_md.trim().is_empty() {
+            if !all_markdown.is_empty() {
+                all_markdown.push_str("\n\n---\n\n");
+            }
+            all_markdown.push_str(page_md.trim());
+        }
+    }
+
+    let output_path = format!("{}/text.md", output_dir);
+    fs::write(&output_path, &all_markdown)
+        .map_err(|e| format!("Failed to write text.md: {}", e))?;
+
+    println!("Extracted text from {} pages to {}", page_count, output_path);
+    Ok(())
 }
 
 fn probe_subtitle_streams(input_file: &str) -> Vec<(u32, String, String, String)> {

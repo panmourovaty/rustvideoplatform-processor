@@ -12,3 +12,6 @@ sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 rand = "0.9"
 ffmpeg-next = "8.0"
 reqwest = { version = "0.13", features = ["blocking", "multipart"] }
+pdfium-render = { version = "0.8", features = ["image", "thread_safe"] }
+pdf_oxide = "0.3"
+image = "0.25"
