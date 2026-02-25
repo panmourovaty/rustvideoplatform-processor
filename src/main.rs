@@ -939,7 +939,12 @@ async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &Pdf
     .execute(&pool)
     .await
     .map_err(|e| format!("Database update error: {}", e))?;
-    let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+
+    // Move the file into the processing folder and rename it to 'document.pdf'
+    let dest_file = format!("{}/document.pdf", output_dir);
+    fs::rename(&input_file, &dest_file)
+        .map_err(|e| format!("Failed to move source document to processing folder: {}", e))?;
+
     Ok(())
 }
 
@@ -984,7 +989,7 @@ fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfC
 
     // Generate thumbnail.avif and thumbnail.jpg using ffmpeg (consistent with other pipelines)
     let avif_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
+        "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
         temp_png, pdf_config.thumbnail_crf, thumb_width, thumb_height, output_dir
     );
     let jpg_cmd = format!(
