@@ -136,6 +136,9 @@ struct WhisperConfig {
     /// Minimum silence duration in seconds to consider as a split point (default: 0.5).
     #[serde(default = "default_whisper_silence_min_duration")]
     silence_min_duration: f64,
+    /// Maximum number of parallel ffmpeg processes for silence detection (default: 4).
+    #[serde(default = "default_whisper_silence_detect_parallel")]
+    silence_detect_parallel: u32,
 }
 
 fn default_whisper_url() -> String { "http://whisper:8080/inference".to_string() }
@@ -146,6 +149,7 @@ fn default_whisper_target_chunk_secs() -> f64 { 600.0 }
 fn default_whisper_max_chunk_secs() -> f64 { 900.0 }
 fn default_whisper_silence_noise_db() -> f64 { -30.0 }
 fn default_whisper_silence_min_duration() -> f64 { 0.5 }
+fn default_whisper_silence_detect_parallel() -> u32 { 4 }
 
 fn default_whisper_config() -> WhisperConfig {
     WhisperConfig {
@@ -157,6 +161,7 @@ fn default_whisper_config() -> WhisperConfig {
         max_chunk_secs: default_whisper_max_chunk_secs(),
         silence_noise_db: default_whisper_silence_noise_db(),
         silence_min_duration: default_whisper_silence_min_duration(),
+        silence_detect_parallel: default_whisper_silence_detect_parallel(),
     }
 }
 
@@ -1365,14 +1370,24 @@ impl SilenceInterval {
     }
 }
 
-/// Detect silence intervals in an audio file using FFmpeg's silencedetect filter.
-/// Returns a sorted list of silence intervals (start, end) in seconds.
-fn detect_silence(input_file: &str, noise_db: f64, min_duration: f64) -> Vec<SilenceInterval> {
+/// Detect silence intervals in a specific time range of an audio file.
+/// Uses `-ss` before `-i` for fast input-level seeking (keyframe seek),
+/// then `-t` to limit the analysis duration.
+/// Returns silence intervals with timestamps adjusted to absolute file positions.
+fn detect_silence_in_range(
+    input_file: &str,
+    noise_db: f64,
+    min_duration: f64,
+    seek_start: f64,
+    range_duration: f64,
+) -> Vec<SilenceInterval> {
     let filter = format!("silencedetect=noise={}dB:d={}", noise_db, min_duration);
     let result = Command::new("ffmpeg")
         .arg("-nostdin")
         .arg("-v").arg("info")
+        .arg("-ss").arg(format!("{:.3}", seek_start))
         .arg("-i").arg(input_file)
+        .arg("-t").arg(format!("{:.3}", range_duration))
         .arg("-af").arg(&filter)
         .arg("-f").arg("null")
         .arg("-")
@@ -1381,13 +1396,22 @@ fn detect_silence(input_file: &str, noise_db: f64, min_duration: f64) -> Vec<Sil
     let output = match result {
         Ok(o) => o,
         Err(e) => {
-            println!("Failed to run FFmpeg silencedetect: {}", e);
+            println!(
+                "Failed to run FFmpeg silencedetect for range {:.0}s-{:.0}s: {}",
+                seek_start, seek_start + range_duration, e
+            );
             return Vec::new();
         }
     };
 
-    // silencedetect writes to stderr
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // When -ss is before -i, ffmpeg resets timestamps to 0 for the seeked segment,
+    // so we offset all detected times by seek_start to get absolute positions.
+    parse_silence_stderr(&String::from_utf8_lossy(&output.stderr), seek_start)
+}
+
+/// Parse silence_start / silence_end lines from ffmpeg stderr.
+/// Adds `offset` to all timestamps (used for windowed detection where -ss resets timestamps).
+fn parse_silence_stderr(stderr: &str, offset: f64) -> Vec<SilenceInterval> {
     let mut intervals = Vec::new();
     let mut current_start: Option<f64> = None;
 
@@ -1396,7 +1420,7 @@ fn detect_silence(input_file: &str, noise_db: f64, min_duration: f64) -> Vec<Sil
             // Format: [silencedetect @ ...] silence_start: 123.456
             if let Some(val) = line.split("silence_start:").nth(1) {
                 if let Ok(s) = val.trim().parse::<f64>() {
-                    current_start = Some(s);
+                    current_start = Some(s + offset);
                 }
             }
         } else if line.contains("silence_end:") {
@@ -1406,7 +1430,7 @@ fn detect_silence(input_file: &str, noise_db: f64, min_duration: f64) -> Vec<Sil
                 let end_str = val.split('|').next().unwrap_or("").trim();
                 if let Ok(e) = end_str.parse::<f64>() {
                     if let Some(s) = current_start.take() {
-                        intervals.push(SilenceInterval { start: s, end: e });
+                        intervals.push(SilenceInterval { start: s, end: e + offset });
                     }
                 }
             }
@@ -1414,6 +1438,107 @@ fn detect_silence(input_file: &str, noise_db: f64, min_duration: f64) -> Vec<Sil
     }
 
     intervals
+}
+
+/// Detect silence only near expected split boundaries for improved performance.
+/// Instead of scanning the entire file (which is very slow for long videos),
+/// this runs parallel windowed silence detection around each expected chunk boundary.
+///
+/// For a 3-hour video with 10-minute targets, this typically reduces wall-clock time
+/// from minutes to seconds by:
+/// 1. Using `-ss` before `-i` for fast keyframe seeking (no decoding from start)
+/// 2. Only analyzing ~6 minutes of audio per split point instead of the full file
+/// 3. Running all windows in parallel via threads
+fn detect_silence_near_splits(
+    input_file: &str,
+    noise_db: f64,
+    min_duration: f64,
+    total_duration: f64,
+    target_secs: f64,
+    max_secs: f64,
+    parallel_limit: u32,
+) -> Vec<SilenceInterval> {
+    let extra = max_secs - target_secs; // how far past target we might need to search (e.g. 300s)
+    let margin = 120.0; // look-back before target to account for accumulated drift
+
+    // Calculate search windows around each expected split boundary
+    let mut windows: Vec<(f64, f64)> = Vec::new();
+    let mut pos = target_secs;
+    while pos < total_duration {
+        let win_start = (pos - margin).max(0.0);
+        let win_end = (pos + extra + 60.0).min(total_duration); // extra buffer past max
+        windows.push((win_start, win_end));
+        pos += target_secs;
+    }
+
+    if windows.is_empty() {
+        return Vec::new();
+    }
+
+    // Merge overlapping or nearly-adjacent windows to avoid redundant scanning
+    windows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in windows {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 + 30.0 {
+                // Windows overlap or are within 30s — merge them
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+
+    let total_scan: f64 = merged.iter().map(|(s, e)| e - s).sum();
+    println!(
+        "Windowed silence detection: {} window(s) covering {:.0}s of {:.0}s ({:.0}% of file)",
+        merged.len(),
+        total_scan,
+        total_duration,
+        (total_scan / total_duration) * 100.0
+    );
+
+    // Run silence detection in parallel, limited to parallel_limit concurrent threads
+    let batch_size = (parallel_limit.max(1)) as usize;
+    println!("Running silence detection with parallel_limit={}", batch_size);
+    let input = input_file.to_string();
+
+    let mut all_silences: Vec<SilenceInterval> = Vec::new();
+    for batch in merged.chunks(batch_size) {
+        let handles: Vec<_> = batch
+            .iter()
+            .map(|&(win_start, win_end)| {
+                let input = input.clone();
+                std::thread::spawn(move || {
+                    detect_silence_in_range(&input, noise_db, min_duration, win_start, win_end - win_start)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            match handle.join() {
+                Ok(mut silences) => all_silences.append(&mut silences),
+                Err(_) => println!("Warning: silence detection thread panicked"),
+            }
+        }
+    }
+
+    // Sort by start time
+    all_silences.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Deduplicate overlapping intervals that may result from overlapping windows
+    let mut deduped: Vec<SilenceInterval> = Vec::new();
+    for interval in all_silences {
+        if let Some(last) = deduped.last_mut() {
+            if interval.start <= last.end + 0.1 {
+                last.end = last.end.max(interval.end);
+                continue;
+            }
+        }
+        deduped.push(interval);
+    }
+
+    deduped
 }
 
 /// Compute split points for audio based on silence intervals.
@@ -1557,8 +1682,16 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             duration, (target_chunk / 60.0) as u32
         );
 
-        let silences = detect_silence(input_file, whisper_config.silence_noise_db, whisper_config.silence_min_duration);
-        println!("Detected {} silence intervals.", silences.len());
+        let silences = detect_silence_near_splits(
+            input_file,
+            whisper_config.silence_noise_db,
+            whisper_config.silence_min_duration,
+            duration,
+            target_chunk,
+            max_chunk,
+            whisper_config.silence_detect_parallel,
+        );
+        println!("Detected {} silence intervals near split boundaries.", silences.len());
 
         let split_points = compute_split_points(duration, &silences, target_chunk, max_chunk);
 
