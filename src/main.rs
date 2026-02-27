@@ -2193,53 +2193,54 @@ fn build_vtt_from_cues(cues: &[VttCue]) -> String {
 
 /// Translate a single text string using TranslateGemma via llama.cpp /completion endpoint.
 /// TranslateGemma uses the prompt format: <2target_lang>source text
+use reqwest::blocking::Client; // Assuming you are using the blocking client
+use serde_json::json;
+
 fn translate_text_via_llama(
     client: &Client,
     text: &str,
     target_lang: &str,
     llama_url: &str,
 ) -> Option<String> {
-    // Collapse multi-line cue text to single line for translation, restore after
+    // 1. Clean up input and format the prompt using Gemma 2 tokens
     let single_line = text.replace('\n', " ");
-    let prompt = format!("<2{}>{}", target_lang, single_line);
+    
+    // TranslateGemma performs best with this specific instruction format
+    let prompt = format!(
+        "<start_of_turn>user\nTranslate to {}: {}<end_of_turn>\n<start_of_turn>model\n",
+        target_lang, single_line
+    );
 
-    let n_predict = ((single_line.len() as u64) * 3).max(128).min(2048);
-    let body = serde_json::json!({
+    // 2. Prepare the payload
+    // Note: cache_prompt is helpful for llama.cpp server to speed up repeated instructions
+    let body = json!({
         "prompt": prompt,
-        "n_predict": n_predict,
+        "n_predict": 1024, 
         "temperature": 0.1,
-        "stop": ["<2", "\n\n\n"],
+        "stop": ["<end_of_turn>", "<start_of_turn>", "\n\n"],
+        "cache_prompt": true 
     });
 
     let url = format!("{}/completion", llama_url.trim_end_matches('/'));
-    let response = match client.post(&url).json(&body).send() {
-        Ok(r) => r,
-        Err(e) => {
-            println!("llama.cpp translation request failed: {}", e);
-            return None;
-        }
-    };
+
+    // 3. Execute request and handle potential errors cleanly
+    let response = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .map_err(|e| {
+            eprintln!("llama.cpp request failed: {}", e);
+            e
+        })
+        .ok()?;
 
     if !response.status().is_success() {
-        println!("llama.cpp translation returned error: {}", response.status());
+        eprintln!("llama.cpp returned error status: {}", response.status());
         return None;
     }
 
-    let body_text = match response.text() {
-        Ok(t) => t,
-        Err(e) => {
-            println!("Failed to read llama.cpp response body: {}", e);
-            return None;
-        }
-    };
-
-    let json: serde_json::Value = match serde_json::from_str(&body_text) {
-        Ok(j) => j,
-        Err(e) => {
-            println!("Failed to parse llama.cpp response JSON: {}", e);
-            return None;
-        }
-    };
+    // 4. Directly parse JSON from the response
+    let json: serde_json::Value = response.json().ok()?;
 
     json.get("content")
         .and_then(|v| v.as_str())
