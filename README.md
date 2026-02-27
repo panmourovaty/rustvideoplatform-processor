@@ -11,6 +11,7 @@ Media processing service that handles video transcoding, audio extraction, pictu
   - **QSV**: Intel Arc / 11th Gen+ with `intel-media-driver` and `onevpl-intel-gpu`
   - **VAAPI**: `libva`, `mesa-va-gallium`, or `intel-media-driver`
 - Optional: [Whisper.cpp](https://github.com/ggerganov/whisper.cpp) server for automatic transcription
+- Optional: [llama.cpp](https://github.com/ggerganov/llama.cpp) server with [TranslateGemma](https://huggingface.co/google/translate-gemma) for subtitle translation
 
 ## Deployment
 
@@ -70,6 +71,23 @@ The processor detects the media type of each file and routes it accordingly:
 
 Subtitle extraction tries embedded streams first, then falls back to Whisper transcription if no subtitles are found. Long audio is split at silence boundaries (targeting 10-minute chunks, up to 15 minutes) so that Whisper never receives a chunk that cuts through speech.
 
+### Subtitle translation
+
+When `translation.languages` is configured, the processor ensures that subtitles in all specified languages are always available for every video and audio file. The translation pipeline works as follows:
+
+1. **Embedded subtitles**: Language tags from the container metadata (ISO 639-2/B codes like `eng`, `cze`, or full names like `English`) are normalized to ISO 639-1 codes and used as filenames (`en.vtt`, `cs.vtt`).
+
+2. **Whisper transcription**: When no embedded subtitles exist, the audio language is auto-detected via Whisper's `verbose_json` response. The transcription is saved as `AI_<detected_lang>.vtt` (e.g., `AI_en.vtt`) instead of the generic `AI_transcription.vtt`.
+
+3. **Translation**: Any configured language that is not already covered by an existing subtitle track is translated using [TranslateGemma](https://huggingface.co/google/translate-gemma) running on a llama.cpp server. Translated subtitles are named `AI_<target_lang>.vtt`. English is preferred as the source language when multiple tracks are available.
+
+For example, with `"languages": ["en", "cs"]`:
+- A video with English audio and no subtitles produces `AI_en.vtt` (Whisper) and `AI_cs.vtt` (translated).
+- A video with embedded Czech subtitles produces `cs.vtt` (extracted) and `AI_en.vtt` (translated).
+- A video with both English and Czech embedded subtitles produces `en.vtt` and `cs.vtt` — no translation needed.
+
+If `translation.languages` is empty or omitted, the old behavior is preserved (`AI_transcription` naming, no translation, no llama.cpp dependency).
+
 ## Configuration
 
 All settings are defined in `config.json`. See `config.json.example` for a complete reference. Every section except `dbconnection` and `video` has sensible defaults and can be omitted.
@@ -80,6 +98,7 @@ All settings are defined in `config.json`. See `config.json.example` for a compl
 {
     "dbconnection": "postgresql://user:password@host:5432/db",
     "whisper": { },
+    "translation": { },
     "audio": { },
     "picture": { },
     "video": { }
@@ -106,6 +125,29 @@ Long audio files are automatically split into chunks at silence boundaries to av
 | `max_chunk_secs` | `900` (15 min) | Maximum chunk duration in seconds. If no silence is found by the target, extend up to this limit |
 | `silence_noise_db` | `-30` | Noise floor threshold in dB for silence detection (lower = stricter) |
 | `silence_min_duration` | `0.5` | Minimum silence gap in seconds to be considered a valid split candidate |
+
+### `translation`
+
+Subtitle translation via TranslateGemma on llama.cpp. When `languages` is set, the processor ensures subtitles exist in every listed language for all media. Existing subtitle language tags are normalized to ISO 639-1 codes, Whisper output is labeled with the detected language, and any missing languages are translated automatically.
+
+Requires a [llama.cpp](https://github.com/ggerganov/llama.cpp) server running a TranslateGemma model. Start the server with:
+
+```bash
+llama-server -m translate-gemma-2b.gguf --port 8081
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `languages` | `[]` (disabled) | Target languages as ISO 639-1 codes (e.g., `["en", "cs"]`). When empty, translation is disabled and legacy naming is used |
+| `llama_url` | `http://llama:8081` | llama.cpp server base URL (the `/completion` endpoint is appended automatically) |
+| `source_language` | `en` | Preferred source language for translation. When multiple subtitle tracks exist, this language is chosen as the translation source |
+| `timeout_secs` | `120` | HTTP timeout in seconds for each individual cue translation request |
+
+Supported language code normalization:
+- **ISO 639-1** (2-letter): `en`, `cs`, `de`, `fr`, etc. — used as-is
+- **ISO 639-2/B** (3-letter): `eng` → `en`, `cze` → `cs`, `ger` → `de`, `fre` → `fr`, etc.
+- **ISO 639-2/T** (3-letter): `ces` → `cs`, `deu` → `de`, `fra` → `fr`, etc.
+- **Full names**: `English` → `en`, `Czech` → `cs`, `German` → `de`, etc.
 
 ### `audio`
 
@@ -286,3 +328,9 @@ ls /dev/dri/
 **Files too large** — Increase the quality value (higher = more compression for VAAPI). Use stricter rate control modes.
 
 **Whisper transcription fails** — Verify the Whisper.cpp server is reachable at the configured URL. Check that the audio file has a valid audio stream.
+
+**Translation not working** — Verify the llama.cpp server is running with a TranslateGemma model and is reachable at the configured `llama_url`. Check that `translation.languages` is set to a non-empty array. The `/completion` endpoint must be available.
+
+**Wrong subtitle language detected** — Whisper language detection uses the first 30 seconds of audio. Short intros in a different language (e.g., foreign-language music before dialogue) may cause incorrect detection. The transcription itself still uses auto-detection per chunk.
+
+**Translation quality is poor** — Use a larger TranslateGemma model variant. Ensure `temperature` is low (the processor uses 0.1 by default). For long subtitle files, check that `timeout_secs` is sufficient — each cue is translated individually and a timeout aborts the request.
