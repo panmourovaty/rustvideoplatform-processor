@@ -9,6 +9,7 @@ use ffmpeg_next::{codec, format, media};
 use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::process::Command;
@@ -2201,28 +2202,19 @@ fn build_vtt_from_cues(cues: &[VttCue]) -> String {
     vtt
 }
 
-/// Translate a single text string using TranslateGemma via llama.cpp /completion endpoint.
-/// TranslateGemma uses the prompt format: <2target_lang>source text
-use reqwest::blocking::Client; // Assuming you are using the blocking client
-use serde_json::json;
-
 fn translate_text_via_llama(
     client: &Client,
     text: &str,
     target_lang: &str,
     llama_url: &str,
 ) -> Option<String> {
-    // 1. Clean up input and format the prompt using Gemma 2 tokens
     let single_line = text.replace('\n', " ");
     
-    // TranslateGemma performs best with this specific instruction format
     let prompt = format!(
         "<start_of_turn>user\nTranslate to {}: {}<end_of_turn>\n<start_of_turn>model\n",
         target_lang, single_line
     );
 
-    // 2. Prepare the payload
-    // Note: cache_prompt is helpful for llama.cpp server to speed up repeated instructions
     let body = json!({
         "prompt": prompt,
         "n_predict": 1024, 
@@ -2233,7 +2225,6 @@ fn translate_text_via_llama(
 
     let url = format!("{}/completion", llama_url.trim_end_matches('/'));
 
-    // 3. Execute request and handle potential errors cleanly
     let response = client
         .post(&url)
         .json(&body)
@@ -2249,7 +2240,6 @@ fn translate_text_via_llama(
         return None;
     }
 
-    // 4. Directly parse JSON from the response
     let json: serde_json::Value = response.json().ok()?;
 
     json.get("content")
@@ -2257,8 +2247,6 @@ fn translate_text_via_llama(
         .map(|s| s.trim().to_string())
 }
 
-/// Translate a VTT subtitle file from source_lang to target_lang using TranslateGemma on llama.cpp.
-/// Each cue's text is translated individually to preserve timestamp alignment.
 fn translate_subtitle_file(
     source_path: &str,
     source_lang: &str,
