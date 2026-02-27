@@ -6,6 +6,7 @@
         "model": "whisper-1",
         "response_format": "vtt",
         "output_label": "AI_transcription",
+        "temperature": 0.0,
         "target_chunk_secs": 600,
         "max_chunk_secs": 900,
         "silence_noise_db": -30,

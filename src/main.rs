@@ -141,6 +141,12 @@ struct WhisperConfig {
     /// Maximum number of parallel ffmpeg processes for silence detection (default: 4).
     #[serde(default = "default_whisper_silence_detect_parallel")]
     silence_detect_parallel: u32,
+    /// Sampling temperature for Whisper (default: 0.0).
+    /// 0.0 uses greedy decoding (most deterministic and accurate for transcription).
+    /// Higher values (up to 1.0) increase randomness; useful if transcription quality
+    /// is poor, but may reduce consistency.
+    #[serde(default = "default_whisper_temperature")]
+    temperature: f32,
 }
 
 fn default_whisper_url() -> String { "http://whisper:8080/inference".to_string() }
@@ -152,6 +158,7 @@ fn default_whisper_max_chunk_secs() -> f64 { 900.0 }
 fn default_whisper_silence_noise_db() -> f64 { -30.0 }
 fn default_whisper_silence_min_duration() -> f64 { 0.5 }
 fn default_whisper_silence_detect_parallel() -> u32 { 4 }
+fn default_whisper_temperature() -> f32 { 0.0 }
 
 fn default_whisper_config() -> WhisperConfig {
     WhisperConfig {
@@ -164,6 +171,7 @@ fn default_whisper_config() -> WhisperConfig {
         silence_noise_db: default_whisper_silence_noise_db(),
         silence_min_duration: default_whisper_silence_min_duration(),
         silence_detect_parallel: default_whisper_silence_detect_parallel(),
+        temperature: default_whisper_temperature(),
     }
 }
 
@@ -1386,6 +1394,7 @@ fn detect_language_via_whisper(input_file: &str, output_dir: &str, whisper_confi
     let form = match multipart::Form::new()
         .text("response_format", "verbose_json".to_string())
         .text("model", whisper_config.model.clone())
+        .text("temperature", whisper_config.temperature.to_string())
         .file("file", &temp_audio)
     {
         Ok(f) => f,
@@ -1866,6 +1875,7 @@ fn whisper_transcribe_file(audio_path: &str, whisper_config: &WhisperConfig, tim
     let form = match multipart::Form::new()
         .text("response_format", whisper_config.response_format.clone())
         .text("model", whisper_config.model.clone())
+        .text("temperature", whisper_config.temperature.to_string())
         .file("file", audio_path)
     {
         Ok(f) => f,

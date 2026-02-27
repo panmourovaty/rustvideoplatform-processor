@@ -121,6 +121,7 @@ Long audio files are automatically split into chunks at silence boundaries to av
 | `model` | `whisper-1` | Model name sent to the API |
 | `response_format` | `vtt` | Subtitle format (`vtt`) |
 | `output_label` | `AI_transcription` | Filename label for generated subtitles |
+| `temperature` | `0.0` | Sampling temperature sent to Whisper. `0.0` uses greedy decoding (most deterministic and accurate). Increase toward `1.0` to introduce randomness if output quality is poor, at the cost of consistency |
 | `target_chunk_secs` | `600` (10 min) | Target chunk duration in seconds. Splits aim for a silence boundary near this point |
 | `max_chunk_secs` | `900` (15 min) | Maximum chunk duration in seconds. If no silence is found by the target, extend up to this limit |
 | `silence_noise_db` | `-30` | Noise floor threshold in dB for silence detection (lower = stricter) |
