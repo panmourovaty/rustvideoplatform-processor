@@ -1417,7 +1417,10 @@ fn detect_language_via_whisper(input_file: &str, output_dir: &str, whisper_confi
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
                     return parsed.get("language")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                        .map(|s| {
+                            // Whisper returns full names like "english"; normalize to ISO 639-1 ("en")
+                            normalize_language_code(s).unwrap_or_else(|| s.to_string())
+                        });
                 }
             }
             None
