@@ -66,6 +66,8 @@ struct Config {
     picture: PictureConfig,
     #[serde(default = "default_pdf_config")]
     pdf: PdfConfig,
+    #[serde(default = "default_translation_config")]
+    translation: TranslationConfig,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -162,6 +164,37 @@ fn default_whisper_config() -> WhisperConfig {
         silence_noise_db: default_whisper_silence_noise_db(),
         silence_min_duration: default_whisper_silence_min_duration(),
         silence_detect_parallel: default_whisper_silence_detect_parallel(),
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct TranslationConfig {
+    /// Target languages as ISO 639-1 codes (e.g., ["en", "cs"]).
+    /// If empty, translation is disabled and Whisper uses the output_label name.
+    #[serde(default)]
+    languages: Vec<String>,
+    /// llama.cpp server URL for TranslateGemma (e.g., "http://llama:8081")
+    #[serde(default = "default_llama_url")]
+    llama_url: String,
+    /// Preferred source language for translation (default: "en").
+    /// When multiple subtitle tracks exist, this language is preferred as the translation source.
+    #[serde(default = "default_translation_source_language")]
+    source_language: String,
+    /// Timeout in seconds for each translation request (default: 120).
+    #[serde(default = "default_translation_timeout_secs")]
+    timeout_secs: u64,
+}
+
+fn default_llama_url() -> String { "http://llama:8081".to_string() }
+fn default_translation_source_language() -> String { "en".to_string() }
+fn default_translation_timeout_secs() -> u64 { 120 }
+
+fn default_translation_config() -> TranslationConfig {
+    TranslationConfig {
+        languages: Vec::new(),
+        llama_url: default_llama_url(),
+        source_language: default_translation_source_language(),
+        timeout_secs: default_translation_timeout_secs(),
     }
 }
 
@@ -753,7 +786,7 @@ async fn process(pool: PgPool, config: Config) {
                     .map_err(|e| format!("picture processing failed: {}", e))
             } else if actual_type == "audio" {
                 println!("processing concept: {} as audio", concept.id);
-                process_audio(concept.id.clone(), pool.clone(), &config.audio, &config.whisper, &config.picture)
+                process_audio(concept.id.clone(), pool.clone(), &config.audio, &config.whisper, &config.picture, &config.translation)
                     .await
                     .map_err(|e| format!("audio processing failed: {}", e))
             } else if actual_type == "document_pdf" {
@@ -796,11 +829,12 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
     let input_file_sub = input_file.clone();
     let output_dir_sub = output_dir.clone();
     let whisper_config = config.whisper.clone();
+    let translation_config = config.translation.clone();
     let input_file_chap = input_file.clone();
     let output_dir_chap = output_dir.clone();
     let (_, _, transcode_result) = tokio::join!(
         task::spawn_blocking(move || {
-            extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config);
+            extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config, &translation_config);
         }),
         task::spawn_blocking(move || {
             extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
@@ -852,7 +886,7 @@ async fn process_picture(concept_id: String, pool: PgPool, picture_config: &Pict
     }
 }
 
-async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTranscodeConfig, whisper_config: &WhisperConfig, picture_config: &PictureConfig) -> Result<(), String> {
+async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTranscodeConfig, whisper_config: &WhisperConfig, picture_config: &PictureConfig, translation_config: &TranslationConfig) -> Result<(), String> {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
@@ -863,11 +897,12 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
     let input_file_sub = input_file.clone();
     let output_dir_sub = output_dir.clone();
     let whisper_config = whisper_config.clone();
+    let translation_config = translation_config.clone();
     let input_file_chap = input_file.clone();
     let output_dir_chap = output_dir.clone();
     let (_, _, transcode_result) = tokio::join!(
         task::spawn_blocking(move || {
-            extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config);
+            extract_subtitles_to_vtt(&input_file_sub, &output_dir_sub, &whisper_config, &translation_config);
         }),
         task::spawn_blocking(move || {
             extract_chapters_to_vtt(&input_file_chap, &output_dir_chap);
@@ -1242,13 +1277,170 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig) -> Vec<String> {
+/// Normalize a language code to ISO 639-1 (two-letter) format.
+/// Handles ISO 639-2/B (e.g., "eng"), ISO 639-2/T (e.g., "ces"), and common full names.
+fn normalize_language_code(code: &str) -> Option<String> {
+    let code_lower = code.to_lowercase();
+    let code_lower = code_lower.trim();
+
+    if code_lower.is_empty() || code_lower == "und" || code_lower == "undetermined" {
+        return None;
+    }
+
+    // Already ISO 639-1 (2-letter) — accept as-is
+    if code_lower.len() == 2 {
+        return Some(code_lower.to_string());
+    }
+
+    // ISO 639-2/B and 639-2/T (3-letter) to ISO 639-1
+    if code_lower.len() == 3 {
+        let mapped = match &*code_lower {
+            "eng" => "en", "cze" | "ces" => "cs", "ger" | "deu" => "de",
+            "fre" | "fra" => "fr", "spa" => "es", "ita" => "it",
+            "por" => "pt", "rus" => "ru", "jpn" => "ja", "kor" => "ko",
+            "chi" | "zho" => "zh", "ara" => "ar", "hin" => "hi",
+            "pol" => "pl", "dut" | "nld" => "nl", "swe" => "sv",
+            "dan" => "da", "nor" | "nob" | "nno" => "no", "fin" => "fi",
+            "hun" => "hu", "tur" => "tr", "gre" | "ell" => "el",
+            "heb" => "he", "tha" => "th", "vie" => "vi", "ind" => "id",
+            "may" | "msa" => "ms", "ukr" => "uk", "rum" | "ron" => "ro",
+            "bul" => "bg", "hrv" | "scr" => "hr", "slo" | "slk" => "sk",
+            "slv" => "sl", "srp" | "scc" => "sr", "lit" => "lt",
+            "lav" => "lv", "est" => "et", "cat" => "ca", "glg" => "gl",
+            "baq" | "eus" => "eu", "wel" | "cym" => "cy", "gle" => "ga",
+            "ice" | "isl" => "is", "mac" | "mkd" => "mk", "alb" | "sqi" => "sq",
+            "bos" => "bs", "mlt" => "mt", "ltz" => "lb", "afr" => "af",
+            "swa" => "sw", "tgl" => "tl", "ben" => "bn", "tam" => "ta",
+            "tel" => "te", "mal" => "ml", "kan" => "kn", "guj" => "gu",
+            "mar" => "mr", "nep" => "ne", "sin" => "si", "khm" => "km",
+            "lao" => "lo", "bur" | "mya" => "my", "geo" | "kat" => "ka",
+            "amh" => "am", "per" | "fas" => "fa", "urd" => "ur",
+            "pus" => "ps", "kur" => "ku", "lat" => "la", "epo" => "eo",
+            _ => return None,
+        };
+        return Some(mapped.to_string());
+    }
+
+    // Full language names
+    match &*code_lower {
+        "english" => Some("en".to_string()),
+        "czech" => Some("cs".to_string()),
+        "german" => Some("de".to_string()),
+        "french" => Some("fr".to_string()),
+        "spanish" => Some("es".to_string()),
+        "italian" => Some("it".to_string()),
+        "portuguese" => Some("pt".to_string()),
+        "russian" => Some("ru".to_string()),
+        "japanese" => Some("ja".to_string()),
+        "korean" => Some("ko".to_string()),
+        "chinese" => Some("zh".to_string()),
+        "arabic" => Some("ar".to_string()),
+        "hindi" => Some("hi".to_string()),
+        "polish" => Some("pl".to_string()),
+        "dutch" => Some("nl".to_string()),
+        "swedish" => Some("sv".to_string()),
+        "danish" => Some("da".to_string()),
+        "norwegian" => Some("no".to_string()),
+        "finnish" => Some("fi".to_string()),
+        "hungarian" => Some("hu".to_string()),
+        "turkish" => Some("tr".to_string()),
+        "greek" => Some("el".to_string()),
+        "hebrew" => Some("he".to_string()),
+        "thai" => Some("th".to_string()),
+        "vietnamese" => Some("vi".to_string()),
+        "indonesian" => Some("id".to_string()),
+        "ukrainian" => Some("uk".to_string()),
+        "romanian" => Some("ro".to_string()),
+        "bulgarian" => Some("bg".to_string()),
+        "croatian" => Some("hr".to_string()),
+        "slovak" => Some("sk".to_string()),
+        "slovenian" => Some("sl".to_string()),
+        "serbian" => Some("sr".to_string()),
+        _ => None,
+    }
+}
+
+/// Detect the language of an audio file using Whisper.cpp verbose_json response.
+/// Extracts a short audio sample and sends it to the Whisper API for language detection.
+fn detect_language_via_whisper(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig) -> Option<String> {
+    let temp_audio = format!("{}/lang_detect_temp.wav", output_dir);
+
+    // Extract first 30 seconds for language detection
+    let extract_result = Command::new("ffmpeg")
+        .arg("-nostdin")
+        .arg("-v").arg("error")
+        .arg("-i").arg(input_file)
+        .arg("-t").arg("30")
+        .arg("-ar").arg("16000")
+        .arg("-ac").arg("1")
+        .arg("-c:a").arg("pcm_s16le")
+        .arg("-y")
+        .arg(&temp_audio)
+        .output();
+
+    if let Err(e) = extract_result {
+        println!("Failed to extract audio for language detection: {}", e);
+        return None;
+    }
+
+    let form = match multipart::Form::new()
+        .text("response_format", "verbose_json".to_string())
+        .text("model", whisper_config.model.clone())
+        .file("file", &temp_audio)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            println!("Failed to read temp audio for language detection: {}", e);
+            let _ = fs::remove_file(&temp_audio);
+            return None;
+        }
+    };
+
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Failed to create HTTP client for language detection: {}", e);
+            let _ = fs::remove_file(&temp_audio);
+            return None;
+        }
+    };
+
+    let response = client.post(&whisper_config.url).multipart(form).send();
+    let _ = fs::remove_file(&temp_audio);
+
+    match response {
+        Ok(res) if res.status().is_success() => {
+            if let Ok(body) = res.text() {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                    return parsed.get("language")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
+            }
+            None
+        }
+        Ok(res) => {
+            println!("Whisper language detection returned error: {}", res.status());
+            None
+        }
+        Err(e) => {
+            println!("Failed to connect to Whisper API for language detection: {}", e);
+            None
+        }
+    }
+}
+
+fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig, translation_config: &TranslationConfig) -> Vec<String> {
     let subtitle_streams = probe_subtitle_streams(input_file);
+    let translation_enabled = !translation_config.languages.is_empty();
 
     // FALLBACK LOGIC: If no subtitles exist in the file, use Whisper.cpp
     if subtitle_streams.is_empty() {
         println!("No built-in subtitles found. Falling back to Whisper.cpp on {}...", whisper_config.url);
-        return generate_whisper_vtt(input_file, output_dir, whisper_config);
+        return generate_whisper_vtt(input_file, output_dir, whisper_config, translation_config);
     }
 
     // Create captions directory
@@ -1256,18 +1448,40 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
     fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
 
     let mut saved_files: Vec<String> = Vec::new();
+    let mut available_subs: Vec<(String, Option<String>)> = Vec::new(); // (filename, iso_lang_code)
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Precompute per-stream output file paths and names
-    let mut outputs: Vec<(u32, String, String, String, String)> = Vec::new();
+    // Tuple: (stream_idx, final_name, output_file, language, title, iso_code)
+    let mut outputs: Vec<(u32, String, String, String, String, Option<String>)> = Vec::new();
 
     for (stream_idx, language, title, codec) in subtitle_streams {
-        let base_name = if !language.is_empty() {
-            sanitize_filename(&language)
-        } else if !title.is_empty() {
-            sanitize_filename(&title)
+        // Try to normalize language tag to ISO 639-1 code
+        let iso_code = if !language.is_empty() {
+            normalize_language_code(&language)
         } else {
-            format!("subtitle_{}", stream_idx)
+            None
+        };
+
+        // When translation is enabled, prefer ISO code as filename
+        let base_name = if translation_enabled {
+            if let Some(ref code) = iso_code {
+                code.clone()
+            } else if !language.is_empty() {
+                sanitize_filename(&language)
+            } else if !title.is_empty() {
+                sanitize_filename(&title)
+            } else {
+                format!("subtitle_{}", stream_idx)
+            }
+        } else {
+            if !language.is_empty() {
+                sanitize_filename(&language)
+            } else if !title.is_empty() {
+                sanitize_filename(&title)
+            } else {
+                format!("subtitle_{}", stream_idx)
+            }
         };
 
         let mut final_name = base_name.clone();
@@ -1281,15 +1495,16 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
         let output_file = format!("{}/{}.vtt", captions_dir, final_name);
 
         println!(
-            "Preparing subtitle stream {} (language: '{}', title: '{}', codec: {}) to VTT as '{}'",
+            "Preparing subtitle stream {} (language: '{}', title: '{}', codec: {}) to VTT as '{}' (iso: {:?})",
             stream_idx,
             if language.is_empty() { "unknown" } else { &language },
             if title.is_empty() { "none" } else { &title },
             codec,
-            final_name
+            final_name,
+            iso_code
         );
 
-        outputs.push((stream_idx, final_name, output_file, language, title));
+        outputs.push((stream_idx, final_name, output_file, language, title, iso_code));
     }
 
     // Build a single ffmpeg invocation that extracts all subtitle streams at once.
@@ -1298,7 +1513,7 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
         .arg("-v").arg("error")
         .arg("-i").arg(input_file);
 
-    for (stream_idx, _final_name, output_file, _language, _title) in &outputs {
+    for (stream_idx, _final_name, output_file, _language, _title, _iso) in &outputs {
         cmd.arg("-map").arg(format!("0:{}", stream_idx))
             .arg("-c:s").arg("webvtt")
             .arg(output_file);
@@ -1312,10 +1527,11 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
     match result {
         Ok(output) => {
             if output.status.success() {
-                for (_stream_idx, final_name, output_file, _language, _title) in outputs {
+                for (_stream_idx, final_name, output_file, _language, _title, iso_code) in outputs {
                     match fs::metadata(&output_file) {
                         Ok(metadata) if metadata.len() > 0 => {
-                            saved_files.push(final_name);
+                            saved_files.push(final_name.clone());
+                            available_subs.push((final_name, iso_code));
                         }
                         _ => { let _ = fs::remove_file(&output_file); }
                     }
@@ -1323,21 +1539,28 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 println!("Failed to extract subtitles to VTT: {}", stderr);
-                for (_stream_idx, _final_name, output_file, _language, _title) in outputs {
+                for (_stream_idx, _final_name, output_file, _language, _title, _iso) in outputs {
                     let _ = fs::remove_file(&output_file);
                 }
             }
         }
         Err(e) => {
             println!("Error executing ffmpeg for subtitle extraction: {}", e);
-            for (_stream_idx, _final_name, output_file, _language, _title) in outputs {
+            for (_stream_idx, _final_name, output_file, _language, _title, _iso) in outputs {
                 let _ = fs::remove_file(&output_file);
             }
         }
     }
 
-    create_list_txt(&captions_dir, &saved_files);
-    saved_files
+    // Translate missing languages if translation is configured
+    if translation_enabled && !available_subs.is_empty() {
+        let all_names = ensure_configured_languages(&captions_dir, &available_subs, translation_config);
+        create_list_txt(&captions_dir, &all_names);
+        all_names
+    } else {
+        create_list_txt(&captions_dir, &saved_files);
+        saved_files
+    }
 }
 
 /// Probe audio duration from a media file.
@@ -1671,9 +1894,32 @@ fn whisper_transcribe_file(audio_path: &str, whisper_config: &WhisperConfig, tim
 /// Audio is optimized for whisper.cpp (16 kHz, mono, PCM_s16le).
 /// Long files are split at silence boundaries with a target of 10 minutes per chunk
 /// and a maximum of 15 minutes to avoid cutting through speech.
-fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig) -> Vec<String> {
+fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig, translation_config: &TranslationConfig) -> Vec<String> {
     let captions_dir = format!("{}/captions", output_dir);
     fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
+
+    let translation_enabled = !translation_config.languages.is_empty();
+
+    // Detect language if translation is enabled
+    let detected_lang = if translation_enabled {
+        println!("Detecting audio language via Whisper...");
+        let lang = detect_language_via_whisper(input_file, output_dir, whisper_config);
+        if let Some(ref l) = lang {
+            println!("Detected audio language: {}", l);
+        } else {
+            println!("Language detection failed or unavailable.");
+        }
+        lang
+    } else {
+        None
+    };
+
+    // Use AI_<detected_lang> naming when translation is enabled, otherwise use config output_label
+    let output_label = if let Some(ref lang) = detected_lang {
+        format!("AI_{}", lang)
+    } else {
+        whisper_config.output_label.clone()
+    };
 
     let duration = probe_audio_duration(input_file);
 
@@ -1784,15 +2030,27 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
 
         let mut saved_files = Vec::new();
         if any_success {
-            let final_name = whisper_config.output_label.clone();
+            let final_name = output_label.clone();
             let output_file = format!("{}/{}.vtt", captions_dir, final_name);
             if fs::write(&output_file, &merged_vtt).is_ok() {
-                println!("Successfully generated merged VTT via Whisper.cpp ({} chunks, silence-based splitting).", chunk_files.len());
+                println!("Successfully generated merged VTT via Whisper.cpp as '{}' ({} chunks, silence-based splitting).", final_name, chunk_files.len());
                 saved_files.push(final_name);
             }
         }
-        create_list_txt(&captions_dir, &saved_files);
-        saved_files
+
+        // Translate missing languages if translation is configured
+        if translation_enabled && !saved_files.is_empty() {
+            let available_subs: Vec<(String, Option<String>)> = saved_files
+                .iter()
+                .map(|name| (name.clone(), detected_lang.clone()))
+                .collect();
+            let all_names = ensure_configured_languages(&captions_dir, &available_subs, translation_config);
+            create_list_txt(&captions_dir, &all_names);
+            all_names
+        } else {
+            create_list_txt(&captions_dir, &saved_files);
+            saved_files
+        }
     } else {
         // Short audio (under target chunk size): single-file path
         let temp_audio = format!("{}/temp_audio.wav", captions_dir);
@@ -1820,17 +2078,29 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
         let mut saved_files = Vec::new();
 
         if let Some(vtt_content) = whisper_transcribe_file(&temp_audio, whisper_config, timeout_secs) {
-            let final_name = whisper_config.output_label.clone();
+            let final_name = output_label.clone();
             let output_file = format!("{}/{}.vtt", captions_dir, final_name);
             if fs::write(&output_file, &vtt_content).is_ok() {
-                println!("Successfully generated VTT via Whisper.cpp.");
+                println!("Successfully generated VTT via Whisper.cpp as '{}'.", final_name);
                 saved_files.push(final_name);
             }
         }
 
         let _ = fs::remove_file(&temp_audio);
-        create_list_txt(&captions_dir, &saved_files);
-        saved_files
+
+        // Translate missing languages if translation is configured
+        if translation_enabled && !saved_files.is_empty() {
+            let available_subs: Vec<(String, Option<String>)> = saved_files
+                .iter()
+                .map(|name| (name.clone(), detected_lang.clone()))
+                .collect();
+            let all_names = ensure_configured_languages(&captions_dir, &available_subs, translation_config);
+            create_list_txt(&captions_dir, &all_names);
+            all_names
+        } else {
+            create_list_txt(&captions_dir, &saved_files);
+            saved_files
+        }
     }
 }
 
@@ -1844,6 +2114,298 @@ fn create_list_txt(captions_dir: &str, saved_files: &[String]) {
             println!("Created list.txt with {} subtitle entries.", saved_files.len());
         }
     }
+}
+
+// --- Subtitle translation support ---
+
+/// A single VTT cue with timestamp range and text content.
+struct VttCue {
+    start: String,
+    end: String,
+    text: String,
+}
+
+/// Parse a WebVTT file into individual cues.
+fn parse_vtt_cues(vtt_content: &str) -> Vec<VttCue> {
+    let mut cues = Vec::new();
+    let mut lines = vtt_content.lines().peekable();
+
+    // Skip past WEBVTT header and any metadata until first timestamp line
+    while let Some(&line) = lines.peek() {
+        if line.contains(" --> ") {
+            break;
+        }
+        lines.next();
+    }
+
+    while lines.peek().is_some() {
+        let line = match lines.next() {
+            Some(l) => l,
+            None => break,
+        };
+
+        if line.contains(" --> ") {
+            let parts: Vec<&str> = line.splitn(2, " --> ").collect();
+            if parts.len() == 2 {
+                let start = parts[0].trim().to_string();
+                let end = parts[1].trim().to_string();
+                let mut text_lines = Vec::new();
+
+                // Collect text lines until empty line or end of input
+                while let Some(&next_line) = lines.peek() {
+                    if next_line.trim().is_empty() {
+                        lines.next();
+                        break;
+                    }
+                    text_lines.push(lines.next().unwrap().to_string());
+                }
+
+                if !text_lines.is_empty() {
+                    cues.push(VttCue {
+                        start,
+                        end,
+                        text: text_lines.join("\n"),
+                    });
+                }
+            }
+        }
+    }
+
+    cues
+}
+
+/// Rebuild a WebVTT file from parsed cues.
+fn build_vtt_from_cues(cues: &[VttCue]) -> String {
+    let mut vtt = String::from("WEBVTT\n\n");
+    for cue in cues {
+        vtt.push_str(&cue.start);
+        vtt.push_str(" --> ");
+        vtt.push_str(&cue.end);
+        vtt.push('\n');
+        vtt.push_str(&cue.text);
+        vtt.push_str("\n\n");
+    }
+    vtt
+}
+
+/// Translate a single text string using TranslateGemma via llama.cpp /completion endpoint.
+/// TranslateGemma uses the prompt format: <2target_lang>source text
+fn translate_text_via_llama(
+    client: &Client,
+    text: &str,
+    target_lang: &str,
+    llama_url: &str,
+) -> Option<String> {
+    // Collapse multi-line cue text to single line for translation, restore after
+    let single_line = text.replace('\n', " ");
+    let prompt = format!("<2{}>{}", target_lang, single_line);
+
+    let n_predict = ((single_line.len() as u64) * 3).max(128).min(2048);
+    let body = serde_json::json!({
+        "prompt": prompt,
+        "n_predict": n_predict,
+        "temperature": 0.1,
+        "stop": ["<2", "\n\n\n"],
+    });
+
+    let url = format!("{}/completion", llama_url.trim_end_matches('/'));
+    let response = match client.post(&url).json(&body).send() {
+        Ok(r) => r,
+        Err(e) => {
+            println!("llama.cpp translation request failed: {}", e);
+            return None;
+        }
+    };
+
+    if !response.status().is_success() {
+        println!("llama.cpp translation returned error: {}", response.status());
+        return None;
+    }
+
+    let body_text = match response.text() {
+        Ok(t) => t,
+        Err(e) => {
+            println!("Failed to read llama.cpp response body: {}", e);
+            return None;
+        }
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&body_text) {
+        Ok(j) => j,
+        Err(e) => {
+            println!("Failed to parse llama.cpp response JSON: {}", e);
+            return None;
+        }
+    };
+
+    json.get("content")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+}
+
+/// Translate a VTT subtitle file from source_lang to target_lang using TranslateGemma on llama.cpp.
+/// Each cue's text is translated individually to preserve timestamp alignment.
+fn translate_subtitle_file(
+    source_path: &str,
+    source_lang: &str,
+    target_lang: &str,
+    output_path: &str,
+    translation_config: &TranslationConfig,
+) -> bool {
+    let vtt_content = match fs::read_to_string(source_path) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Failed to read source VTT for translation: {}", e);
+            return false;
+        }
+    };
+
+    let cues = parse_vtt_cues(&vtt_content);
+    if cues.is_empty() {
+        println!("No cues found in source VTT for translation.");
+        return false;
+    }
+
+    println!(
+        "Translating {} cues from {} to {} via TranslateGemma at {}...",
+        cues.len(), source_lang, target_lang, translation_config.llama_url
+    );
+
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(translation_config.timeout_secs))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Failed to create HTTP client for translation: {}", e);
+            return false;
+        }
+    };
+
+    let mut translated_cues = Vec::new();
+    let total = cues.len();
+
+    for (i, cue) in cues.iter().enumerate() {
+        let translated_text = translate_text_via_llama(
+            &client, &cue.text, target_lang, &translation_config.llama_url,
+        );
+
+        match translated_text {
+            Some(text) if !text.is_empty() => {
+                translated_cues.push(VttCue {
+                    start: cue.start.clone(),
+                    end: cue.end.clone(),
+                    text,
+                });
+            }
+            _ => {
+                // Keep original text if translation fails
+                println!("Warning: failed to translate cue {}/{}, keeping original.", i + 1, total);
+                translated_cues.push(VttCue {
+                    start: cue.start.clone(),
+                    end: cue.end.clone(),
+                    text: cue.text.clone(),
+                });
+            }
+        }
+
+        if (i + 1) % 100 == 0 {
+            println!("Translation progress: {}/{} cues ({} -> {})", i + 1, total, source_lang, target_lang);
+        }
+    }
+
+    let output_vtt = build_vtt_from_cues(&translated_cues);
+    match fs::write(output_path, &output_vtt) {
+        Ok(()) => {
+            println!(
+                "Successfully translated subtitles {} -> {} ({} cues).",
+                source_lang, target_lang, total
+            );
+            true
+        }
+        Err(e) => {
+            println!("Failed to write translated VTT: {}", e);
+            false
+        }
+    }
+}
+
+/// Ensure all configured subtitle languages are available by translating from existing subtitles.
+/// Prefers the configured source_language (default: "en") as the translation source.
+/// available_subs is a list of (filename_without_ext, optional_iso_lang_code).
+fn ensure_configured_languages(
+    captions_dir: &str,
+    available_subs: &[(String, Option<String>)],
+    translation_config: &TranslationConfig,
+) -> Vec<String> {
+    let mut all_names: Vec<String> = available_subs.iter().map(|(name, _)| name.clone()).collect();
+
+    if translation_config.languages.is_empty() {
+        return all_names;
+    }
+
+    // Determine which configured languages are already covered
+    let covered_langs: std::collections::HashSet<String> = available_subs
+        .iter()
+        .filter_map(|(_, lang)| lang.clone())
+        .collect();
+
+    let missing_langs: Vec<&String> = translation_config
+        .languages
+        .iter()
+        .filter(|lang| !covered_langs.contains(*lang))
+        .collect();
+
+    if missing_langs.is_empty() {
+        println!("All configured subtitle languages are already available.");
+        return all_names;
+    }
+
+    println!(
+        "Missing subtitle languages: {:?}. Available: {:?}",
+        missing_langs,
+        available_subs.iter().map(|(n, l)| format!("{}({})", n, l.as_deref().unwrap_or("?"))).collect::<Vec<_>>()
+    );
+
+    // Find best source subtitle: prefer configured source_language (default "en")
+    let source = available_subs
+        .iter()
+        .find(|(_, lang)| lang.as_deref() == Some(&translation_config.source_language))
+        .or_else(|| available_subs.first());
+
+    let (source_name, source_lang) = match source {
+        Some((name, lang)) => (
+            name.clone(),
+            lang.clone().unwrap_or_else(|| "unknown".to_string()),
+        ),
+        None => {
+            println!("No source subtitle available for translation.");
+            return all_names;
+        }
+    };
+
+    let source_path = format!("{}/{}.vtt", captions_dir, source_name);
+    println!(
+        "Using '{}' ({}) as translation source.",
+        source_name, source_lang
+    );
+
+    for target_lang in &missing_langs {
+        let output_name = format!("AI_{}", target_lang);
+        let output_path = format!("{}/{}.vtt", captions_dir, output_name);
+
+        if translate_subtitle_file(
+            &source_path,
+            &source_lang,
+            target_lang,
+            &output_path,
+            translation_config,
+        ) {
+            all_names.push(output_name);
+        }
+    }
+
+    all_names
 }
 
 fn extract_chapters_to_vtt(input_file: &str, output_dir: &str) {
