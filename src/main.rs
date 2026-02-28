@@ -2202,6 +2202,56 @@ fn build_vtt_from_cues(cues: &[VttCue]) -> String {
     vtt
 }
 
+/// Strips common LLM preamble patterns from translation output.
+/// Models sometimes output phrases like "Here are translation options:" or
+/// "Zde je několik možností překladu, v závislosti na kontextu:" before the
+/// actual translated text.
+fn strip_translation_preamble(text: &str) -> String {
+    let trimmed = text.trim();
+
+    // If the first line ends with a colon it's an introductory preamble.
+    let first_newline = trimmed.find('\n');
+    let first_line = match first_newline {
+        Some(pos) => &trimmed[..pos],
+        None => trimmed,
+    };
+
+    if first_line.trim_end().ends_with(':') {
+        if let Some(pos) = first_newline {
+            let rest = trimmed[pos..].trim();
+            if !rest.is_empty() {
+                // Strip a leading list marker such as "1. ", "1) ", "- ", "* "
+                let without_marker = strip_list_prefix(rest);
+                // Take only the first option (up to the next newline)
+                let first_option = without_marker.lines().next().unwrap_or("").trim();
+                if !first_option.is_empty() {
+                    return first_option.to_string();
+                }
+            }
+        }
+        // Only the preamble came through with nothing after it — signal failure.
+        return String::new();
+    }
+
+    trimmed.to_string()
+}
+
+fn strip_list_prefix(text: &str) -> &str {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    if bytes.len() > 2 {
+        // "1. " / "1) " / "2. " etc.
+        if bytes[0].is_ascii_digit() && (bytes[1] == b'.' || bytes[1] == b')') && bytes[2] == b' ' {
+            return text[3..].trim();
+        }
+        // "- " / "* "
+        if (bytes[0] == b'-' || bytes[0] == b'*') && bytes[1] == b' ' {
+            return text[2..].trim();
+        }
+    }
+    text
+}
+
 fn translate_text_via_llama(
     client: &Client,
     text: &str,
@@ -2209,9 +2259,9 @@ fn translate_text_via_llama(
     llama_url: &str,
 ) -> Option<String> {
     let single_line = text.replace('\n', " ");
-    
+
     let prompt = format!(
-        "<start_of_turn>user\nTranslate to {}: {}<end_of_turn>\n<start_of_turn>model\n",
+        "<start_of_turn>user\nTranslate the following to {}. Output ONLY the translated text, no explanations or alternatives:\n{}<end_of_turn>\n<start_of_turn>model\n",
         target_lang, single_line
     );
 
@@ -2244,7 +2294,8 @@ fn translate_text_via_llama(
 
     json.get("content")
         .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
+        .map(|s| strip_translation_preamble(s))
+        .filter(|s| !s.is_empty())
 }
 
 fn translate_subtitle_file(
