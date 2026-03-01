@@ -3609,23 +3609,23 @@ async fn transcode_video(
     }
 
     let dash_output_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M {} {}{} \
-        -c copy -map_metadata -1 \
-        -dash_segment_type webm \
-        -use_timeline 0 \
-        -use_template 1 \
-        -frag_duration {} \
-        -adaptation_sets '{}' \
-        -window_size 0 \
-        -extra_window_size 0 \
-        -streaming 0 \
-        -fflags +genpts \
-        -avoid_negative_ts make_zero \
-        -index_correction 0 \
-        -init_seg_name 'init_$RepresentationID$.webm' \
-        -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' \
-        '{}/video.mpd'",
-        dash_input_cmds, maps, metadata_args, config.dash.segment_duration, adaptation_sets, dash_output_dir
+        "ffmpeg -nostdin -y -analyzeduration 10M -probesize 10M {} {}{} \
+         -c copy -map_metadata -1 \
+         -f dash -dash_segment_type webm \
+         -use_template 1 -use_timeline 0 \
+         -seg_duration {} \
+         -window_size 0 -extra_window_size 0 \
+         -copyts -avoid_negative_ts 1 \
+         -adaptation_sets '{}' \
+         -init_seg_name 'init_$RepresentationID$.webm' \
+         -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' \
+         '{}/video.mpd'",
+        dash_input_cmds,
+        maps,
+        metadata_args,
+        config.dash.segment_duration,
+        adaptation_sets,
+        dash_output_dir
     );
 
     println!("Executing: {}", dash_output_cmd);
