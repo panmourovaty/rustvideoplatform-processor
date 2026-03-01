@@ -1033,11 +1033,11 @@ fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfC
 
     // Generate thumbnail.avif and thumbnail.jpg using ffmpeg (consistent with other pipelines)
     let avif_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
         temp_png, pdf_config.thumbnail_crf, thumb_width, thumb_height, output_dir
     );
     let jpg_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
         temp_png, thumb_width, thumb_height, pdf_config.jpg_quality, output_dir
     );
 
@@ -1218,7 +1218,7 @@ async fn transcode_audio_streams_for_dash(
         let output_file = format!("{}/audio_stream_{}.mp4", output_dir, audio_idx);
 
         let mut cmd = format!(
-            "ffmpeg -nostdin -y -i '{}' -map 0:a:{} -c:a {} -b:a {}k -vbr {} -ac {} -vn",
+            "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -map 0:a:{} -c:a {} -b:a {}k -vbr {} -ac {} -vn",
             input_file, audio_idx, dash_config.audio_codec, audio_bitrate, dash_config.audio_vbr, dash_config.audio_channels
         );
 
@@ -1377,6 +1377,8 @@ fn detect_language_via_whisper(input_file: &str, output_dir: &str, whisper_confi
     // Extract first 30 seconds for language detection
     let extract_result = Command::new("ffmpeg")
         .arg("-nostdin")
+        .arg("-analyzeduration").arg("100M")
+        .arg("-probesize").arg("100M")
         .arg("-v").arg("error")
         .arg("-i").arg(input_file)
         .arg("-t").arg("30")
@@ -1523,6 +1525,8 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
     // Build a single ffmpeg invocation that extracts all subtitle streams at once.
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-nostdin")
+        .arg("-analyzeduration").arg("100M")
+        .arg("-probesize").arg("100M")
         .arg("-v").arg("error")
         .arg("-i").arg(input_file);
 
@@ -2560,15 +2564,15 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
 
     // Run all three picture transcodes in parallel
     let transcode_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
         input_file, picture_config.crf, output_dir
     );
     let thumbnail_cmd = format!(
-            "ffmpeg -nostdin -y -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
+            "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
             input_file, picture_config.thumbnail_crf, thumb_width, thumb_height, output_dir
         );
     let thumbnail_ogp_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
         input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
 
@@ -2752,7 +2756,7 @@ fn extract_additional_audio(input_file: &str, output_dir: &str, audio_config: &A
 
         let output_path = format!("{}/audio_{}.{}", output_dir, idx + 1, audio_config.output_format);
         let extract_cmd = format!(
-            "ffmpeg -nostdin -y -i '{}' -map 0:a:{} -c:a {} -b:a {} -vbr {} -application {} '{}'",
+            "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -map 0:a:{} -c:a {} -b:a {} -vbr {} -application {} '{}'",
             input_file, stream_idx, audio_config.codec, bitrate, audio_config.vbr, audio_config.application, output_path
         );
 
@@ -2829,15 +2833,15 @@ async fn extract_secondary_video_as_cover(
 
     // Run all three cover extractions in parallel
     let cover_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
         input_file, stream_selector, picture_config.cover_crf, output_dir
     );
     let thumbnail_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
         input_file, stream_selector, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, output_dir
     );
     let thumbnail_jpg_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -map 0:{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -map 0:{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
         input_file, stream_selector, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
 
@@ -2878,15 +2882,15 @@ async fn extract_album_cover(input_file: &str, output_dir: &str, picture_config:
 
     // Run all three cover extractions in parallel
     let cover_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 '{}/picture.avif'",
         input_file, picture_config.cover_crf, output_dir
     );
     let thumbnail_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail.avif'",
         input_file, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, output_dir
     );
     let thumbnail_jpg_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -map 0:v:0 -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -i '{}' -map 0:v:0 -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
         input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
 
@@ -3422,7 +3426,7 @@ async fn transcode_video(
 
                 if hdr_info.is_hdr {
                     format!(
-                        "ffmpeg -nostdin -y {} -i '{}' \
+                        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M {} -i '{}' \
                          -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' \
                          {} -pix_fmt p010le \
                          -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
@@ -3434,7 +3438,7 @@ async fn transcode_video(
                     )
                 } else {
                     format!(
-                        "ffmpeg -nostdin -y {} -i '{}' \
+                        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M {} -i '{}' \
                          -vf 'vpp_qsv=w={}:h={}:format=p010le' \
                          {} -pix_fmt p010le \
                          -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
@@ -3455,12 +3459,12 @@ async fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease:finterp=true", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -nostdin -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i '{}' -vf '{}' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
+                        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i '{}' -vf '{}' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         input_file, filter_chain, codec_params, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
+                        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M {} -i '{}' -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         hwaccel_args, input_file, w, h, codec_params, output_file
                     )
                 }
@@ -3474,12 +3478,12 @@ async fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -nostdin -y -vaapi_device /dev/dri/renderD128 -i '{}' -vf '{}' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
+                        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M -vaapi_device /dev/dri/renderD128 -i '{}' -vf '{}' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         input_file, filter_chain, codec_params, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
+                        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M {} -i '{}' -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         hwaccel_args, input_file, w, h, codec_params, output_file
                     )
                 }
@@ -3609,7 +3613,7 @@ async fn transcode_video(
     }
 
     let dash_output_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 10M -probesize 10M {} {}{} \
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M {} {}{} \
          -c copy -map_metadata -1 \
          -f dash -dash_segment_type mp4 \
          -use_template 1 -use_timeline 0 \
