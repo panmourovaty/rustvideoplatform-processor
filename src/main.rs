@@ -416,7 +416,7 @@ struct DashConfig {
 fn default_dash_audio_codec() -> String { "libopus".to_string() }
 fn default_dash_audio_vbr() -> String { "constrained".to_string() }
 fn default_dash_audio_channels() -> u32 { 2 }
-fn default_dash_segment_duration() -> u32 { 10500 }
+fn default_dash_segment_duration() -> u32 { 5 }
 
 fn default_dash_config() -> DashConfig {
     DashConfig {
@@ -3609,18 +3609,19 @@ async fn transcode_video(
     }
 
     let dash_output_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 10M -probesize 10M {} {}{} \
-        -c copy -map_metadata -1 -f dash \
+        "ffmpeg -nostdin -y -analyzeduration 100M -probesize 100M {} {}{} \
+        -c copy -map_metadata -1 \
         -dash_segment_type webm \
-        -use_timeline 1 \
+        -use_timeline 0 \
         -use_template 1 \
         -seg_duration {} \
-        -profile full \
         -adaptation_sets '{}' \
-        -cluster_size_limit 5M \
-        -cluster_time_limit 5000 \
+        -window_size 0 \
+        -extra_window_size 0 \
+        -streaming 0 \
+        -index_correction 1 \
         -init_seg_name 'init_$RepresentationID$.webm' \
-        -media_seg_name 'chunk_$RepresentationID$_$Time$.webm' \
+        -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' \
         '{}/video.mpd'",
         dash_input_cmds, maps, metadata_args, config.dash.segment_duration, adaptation_sets, dash_output_dir
     );
