@@ -3616,7 +3616,7 @@ async fn transcode_video(
         "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M {} {}{} \
          -c copy -map_metadata -1 \
          -f dash -dash_segment_type mp4 \
-         -use_template 1 -use_timeline 0 \
+         -use_template 1 -use_timeline 1 \
          -seg_duration {} \
          -window_size 0 -extra_window_size 0 \
          -copyts -avoid_negative_ts 1 \
