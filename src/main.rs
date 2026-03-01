@@ -416,7 +416,7 @@ struct DashConfig {
 fn default_dash_audio_codec() -> String { "libopus".to_string() }
 fn default_dash_audio_vbr() -> String { "constrained".to_string() }
 fn default_dash_audio_channels() -> u32 { 2 }
-fn default_dash_segment_duration() -> u32 { 5 }
+fn default_dash_segment_duration() -> u32 { 8 }
 
 fn default_dash_config() -> DashConfig {
     DashConfig {
@@ -3614,12 +3614,14 @@ async fn transcode_video(
         -dash_segment_type webm \
         -use_timeline 0 \
         -use_template 1 \
-        -seg_duration {} \
+        -frag_duration {} \
         -adaptation_sets '{}' \
         -window_size 0 \
         -extra_window_size 0 \
         -streaming 0 \
-        -index_correction 1 \
+        -fflags +genpts \
+        -avoid_negative_ts make_zero \
+        -index_correction 0 \
         -init_seg_name 'init_$RepresentationID$.webm' \
         -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' \
         '{}/video.mpd'",
