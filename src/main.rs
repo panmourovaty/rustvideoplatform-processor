@@ -416,7 +416,7 @@ struct DashConfig {
 fn default_dash_audio_codec() -> String { "libopus".to_string() }
 fn default_dash_audio_vbr() -> String { "constrained".to_string() }
 fn default_dash_audio_channels() -> u32 { 2 }
-fn default_dash_segment_duration() -> u32 { 8 }
+fn default_dash_segment_duration() -> u32 { 10 }
 
 fn default_dash_config() -> DashConfig {
     DashConfig {
@@ -3605,10 +3605,9 @@ async fn transcode_video(
     // Build language metadata for audio streams
     let mut metadata_args = String::new();
     for (audio_idx, (_, language, _)) in audio_fmp4_files.iter().enumerate() {
-        let output_stream_idx = num_video_outputs + audio_idx;
         if !language.is_empty() {
-            metadata_args.push_str(&format!(" -metadata:s:{} language={}", output_stream_idx, language));
-            metadata_args.push_str(&format!(" -metadata:s:{} title=\"{}\"", output_stream_idx, language));
+            metadata_args.push_str(&format!(" -metadata:s:a:{} language={}", audio_idx, language));
+            metadata_args.push_str(&format!(" -metadata:s:a:{} title=\"{}\"", audio_idx, language));
         }
     }
 
