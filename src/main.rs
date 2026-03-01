@@ -3608,6 +3608,7 @@ async fn transcode_video(
         if !language.is_empty() {
             metadata_args.push_str(&format!(" -metadata:s:a:{} language={}", audio_idx, language));
             metadata_args.push_str(&format!(" -metadata:s:a:{} title=\"{}\"", audio_idx, language));
+            metadata_args.push_str(&format!(" -metadata:s:a:{} handler_name=\"{}\"", audio_idx, language));
         }
     }
 
