@@ -2267,10 +2267,10 @@ fn translate_text_via_llama(
 
     let body = json!({
         "prompt": prompt,
-        "n_predict": 1024, 
+        "n_predict": 1024,
         "temperature": 0.1,
         "stop": ["<end_of_turn>", "<start_of_turn>", "\n\n"],
-        "cache_prompt": true 
+        "cache_prompt": true
     });
 
     let url = format!("{}/completion", llama_url.trim_end_matches('/'));
@@ -3610,11 +3610,17 @@ async fn transcode_video(
 
     let dash_output_cmd = format!(
         "ffmpeg -nostdin -y -analyzeduration 10M -probesize 10M {} {}{} \
-        -c copy -map_metadata -1 -f dash -dash_segment_type webm \
-        -use_timeline 1 -use_template 1 -min_seg_duration {} \
+        -c copy -map_metadata -1 -f dash \
+        -dash_segment_type webm \
+        -use_timeline 1 \
+        -use_template 1 \
+        -seg_duration {} \
+        -profile full \
         -adaptation_sets '{}' \
+        -cluster_size_limit 5M \
+        -cluster_time_limit 5000 \
         -init_seg_name 'init_$RepresentationID$.webm' \
-        -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' \
+        -media_seg_name 'chunk_$RepresentationID$_$Time$.webm' \
         '{}/video.mpd'",
         dash_input_cmds, maps, metadata_args, config.dash.segment_duration, adaptation_sets, dash_output_dir
     );
