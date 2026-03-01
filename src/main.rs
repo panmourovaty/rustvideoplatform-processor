@@ -1215,7 +1215,7 @@ async fn transcode_audio_streams_for_dash(
     let mut handles = Vec::new();
 
     for (audio_idx, (_stream_index, language, title, _codec)) in audio_streams.iter().enumerate() {
-        let output_file = format!("{}/audio_stream_{}.webm", output_dir, audio_idx);
+        let output_file = format!("{}/audio_stream_{}.mp4", output_dir, audio_idx);
 
         let mut cmd = format!(
             "ffmpeg -nostdin -y -i '{}' -map 0:a:{} -c:a {} -b:a {}k -vbr {} -ac {} -vn",
@@ -1230,7 +1230,7 @@ async fn transcode_audio_streams_for_dash(
             cmd.push_str(&format!(" -metadata:s:a:0 title='{}'", title.replace('\'', "'\\''")));
         }
 
-        cmd.push_str(&format!(" -f webm '{}'", output_file));
+        cmd.push_str(&format!(" -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'", output_file));
 
         let language_owned = language.clone();
         let title_owned = title.clone();
@@ -3401,7 +3401,7 @@ async fn transcode_video(
 
     println!("Generated {} quality outputs: {:?}", outputs.len(), outputs.iter().map(|(_, _, label)| label.clone()).collect::<Vec<_>>());
 
-    let mut webm_files = Vec::new();
+    let mut fmp4_files = Vec::new();
     let dash_output_dir = format!("{}/video", output_dir);
 
     // Detect HDR characteristics
@@ -3413,8 +3413,8 @@ async fn transcode_video(
     // Transcode each quality level in parallel (video-only; audio is transcoded once separately for DASH)
     let mut transcode_handles = Vec::new();
     for (w, h, label) in &outputs {
-        let output_file = format!("{}/output_{}.webm", output_dir, label);
-        webm_files.push(output_file.clone());
+        let output_file = format!("{}/output_{}.mp4", output_dir, label);
+        fmp4_files.push(output_file.clone());
 
         let cmd = match encoder_type {
             EncoderType::Qsv => {
@@ -3425,7 +3425,7 @@ async fn transcode_video(
                         "ffmpeg -nostdin -y {} -i '{}' \
                          -vf 'vpp_qsv=w={}:h={}:tonemap=1:format=p010le:out_color_matrix=bt709' \
                          {} -pix_fmt p010le \
-                         -an -f webm '{}'",
+                         -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         hwaccel_args,
                         input_file,
                         w, h,
@@ -3437,7 +3437,7 @@ async fn transcode_video(
                         "ffmpeg -nostdin -y {} -i '{}' \
                          -vf 'vpp_qsv=w={}:h={}:format=p010le' \
                          {} -pix_fmt p010le \
-                         -an -f webm '{}'",
+                         -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         hwaccel_args,
                         input_file,
                         w, h,
@@ -3455,12 +3455,12 @@ async fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease:finterp=true", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -nostdin -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i '{}' -vf '{}' {} -an -f webm '{}'",
+                        "ffmpeg -nostdin -y -init_hw_device cuda=cuda0 -filter_hw_device cuda0 -i '{}' -vf '{}' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         input_file, filter_chain, codec_params, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -an -f webm '{}'",
+                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_cuda={}:{}:force_original_aspect_ratio=decrease:finterp=true' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         hwaccel_args, input_file, w, h, codec_params, output_file
                     )
                 }
@@ -3474,12 +3474,12 @@ async fn transcode_video(
                         format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=p010le", tonemap_filter, w, h)
                     };
                     format!(
-                        "ffmpeg -nostdin -y -vaapi_device /dev/dri/renderD128 -i '{}' -vf '{}' {} -an -f webm '{}'",
+                        "ffmpeg -nostdin -y -vaapi_device /dev/dri/renderD128 -i '{}' -vf '{}' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         input_file, filter_chain, codec_params, output_file
                     )
                 } else {
                     format!(
-                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -an -f webm '{}'",
+                        "ffmpeg -nostdin -y {} -i '{}' -vf 'scale_vaapi={}:{}:force_original_aspect_ratio=decrease,format=p010le' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
                         hwaccel_args, input_file, w, h, codec_params, output_file
                     )
                 }
@@ -3518,11 +3518,11 @@ async fn transcode_video(
         }
     }
 
-    println!("Creating WebM DASH manifest...");
-    webm_files.retain(|file| fs::metadata(file).is_ok());
+    println!("Creating CMAF DASH manifest...");
+    fmp4_files.retain(|file| fs::metadata(file).is_ok());
 
-    if webm_files.is_empty() {
-        eprintln!("No WebM files were successfully encoded, cannot create DASH manifest");
+    if fmp4_files.is_empty() {
+        eprintln!("No fMP4 files were successfully encoded, cannot create CMAF manifest");
         return Err(ffmpeg_next::Error::External);
     }
 
@@ -3541,28 +3541,28 @@ async fn transcode_video(
         }).collect::<Vec<_>>()
     );
 
-    let audio_webm_files = if !audio_streams.is_empty() {
+    let audio_fmp4_files = if !audio_streams.is_empty() {
         transcode_audio_streams_for_dash(input_file, output_dir, dash_audio_bitrate, &audio_streams, &config.dash).await
     } else {
         Vec::new()
     };
 
     // Verify all audio streams were successfully transcoded
-    if audio_webm_files.len() != audio_streams.len() {
+    if audio_fmp4_files.len() != audio_streams.len() {
         eprintln!(
-            "WARNING: Audio stream count mismatch! Source has {} audio stream(s) but only {} were successfully transcoded. Missing tracks will not appear in DASH manifest.",
+            "WARNING: Audio stream count mismatch! Source has {} audio stream(s) but only {} were successfully transcoded. Missing tracks will not appear in CMAF manifest.",
             audio_streams.len(),
-            audio_webm_files.len()
+            audio_fmp4_files.len()
         );
     }
 
-    // Build DASH inputs: video files first, then audio files
-    let num_video_files = webm_files.len();
-    let mut all_inputs: Vec<String> = webm_files
+    // Build CMAF inputs: video files first, then audio files
+    let num_video_files = fmp4_files.len();
+    let mut all_inputs: Vec<String> = fmp4_files
         .iter()
         .map(|file| format!("-i '{}'", file))
         .collect();
-    for (audio_file, _, _) in &audio_webm_files {
+    for (audio_file, _, _) in &audio_fmp4_files {
         all_inputs.push(format!("-i '{}'", audio_file));
     }
     let dash_input_cmds = all_inputs.join(" ");
@@ -3572,27 +3572,27 @@ async fn transcode_video(
     for track_num in 0..num_video_files {
         maps.push_str(&format!(" -map {}:v", track_num));
     }
-    for (audio_idx, _) in audio_webm_files.iter().enumerate() {
+    for (audio_idx, _) in audio_fmp4_files.iter().enumerate() {
         maps.push_str(&format!(" -map {}:a:0", num_video_files + audio_idx));
     }
 
     // No fallback needed: video files are video-only (-an), audio is always
     // transcoded separately via transcode_audio_streams_for_dash(). If no audio
-    // streams exist in the source, the DASH manifest will simply have no audio.
+    // streams exist in the source, the CMAF manifest will simply have no audio.
 
     // Build adaptation sets: one for video, one per audio language
     // Output stream indices: 0..num_video-1 are video, num_video..num_video+num_audio-1 are audio
     let num_video_outputs = num_video_files;
     let mut adaptation_sets = String::from("id=0,streams=v");
 
-    if audio_webm_files.len() <= 1 {
+    if audio_fmp4_files.len() <= 1 {
         // Single audio (or none): simple adaptation set
-        if !audio_webm_files.is_empty() {
+        if !audio_fmp4_files.is_empty() {
             adaptation_sets.push_str(&format!(" id=1,streams={}", num_video_outputs));
         }
     } else {
         // Multiple audio streams: separate adaptation set per language
-        for (audio_idx, _audio_info) in audio_webm_files.iter().enumerate() {
+        for (audio_idx, _audio_info) in audio_fmp4_files.iter().enumerate() {
             let output_stream_idx = num_video_outputs + audio_idx;
             adaptation_sets.push_str(&format!(" id={},streams={}", audio_idx + 1, output_stream_idx));
         }
@@ -3600,7 +3600,7 @@ async fn transcode_video(
 
     // Build language metadata for audio streams
     let mut metadata_args = String::new();
-    for (audio_idx, (_, language, _)) in audio_webm_files.iter().enumerate() {
+    for (audio_idx, (_, language, _)) in audio_fmp4_files.iter().enumerate() {
         let output_stream_idx = num_video_outputs + audio_idx;
         if !language.is_empty() {
             metadata_args.push_str(&format!(" -metadata:s:{} language={}", output_stream_idx, language));
@@ -3611,14 +3611,14 @@ async fn transcode_video(
     let dash_output_cmd = format!(
         "ffmpeg -nostdin -y -analyzeduration 10M -probesize 10M {} {}{} \
          -c copy -map_metadata -1 \
-         -f dash -dash_segment_type webm \
+         -f dash -dash_segment_type mp4 \
          -use_template 1 -use_timeline 0 \
          -seg_duration {} \
          -window_size 0 -extra_window_size 0 \
          -copyts -avoid_negative_ts 1 \
          -adaptation_sets '{}' \
-         -init_seg_name 'init_$RepresentationID$.webm' \
-         -media_seg_name 'chunk_$RepresentationID$_$Number$.webm' \
+         -init_seg_name 'init_$RepresentationID$.mp4' \
+         -media_seg_name 'chunk_$RepresentationID$_$Number$.m4s' \
          '{}/video.mpd'",
         dash_input_cmds,
         maps,
@@ -3644,47 +3644,47 @@ async fn transcode_video(
 
     // Post-process MPD to add <Label> and <Role> elements for audio track selection
     let mpd_path = format!("{}/video.mpd", dash_output_dir);
-    post_process_dash_manifest(&mpd_path, &audio_webm_files);
+    post_process_dash_manifest(&mpd_path, &audio_fmp4_files);
 
     //OGP video - find quarter_resolution dynamically
-    let ogp_source = format!("{}/output_quarter_resolution.webm", output_dir);
-    let ogp_dest = format!("{}/video/video.webm", output_dir);
+    let ogp_source = format!("{}/output_quarter_resolution.mp4", output_dir);
+    let ogp_dest = format!("{}/video/video.mp4", output_dir);
 
     let ogp_video_result = if fs::metadata(&ogp_source).is_ok() {
         fs::rename(&ogp_source, &ogp_dest)
     } else {
         // Fallback: use the middle quality available
-        if !webm_files.is_empty() {
-            let middle_idx = webm_files.len() / 2;
-            let fallback_source = &webm_files[middle_idx];
+        if !fmp4_files.is_empty() {
+            let middle_idx = fmp4_files.len() / 2;
+            let fallback_source = &fmp4_files[middle_idx];
             let fallback_result = fs::rename(fallback_source, &ogp_dest);
-            webm_files.remove(middle_idx);
+            fmp4_files.remove(middle_idx);
             fallback_result
         } else {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No suitable OGP video found"))
         }
     };
 
-    // Remove quarter_resolution from webm_files list if it exists
-    if let Some(idx) = webm_files.iter().position(|f| f.ends_with("_quarter_resolution.webm")) {
-        webm_files.remove(idx);
+    // Remove quarter_resolution from fmp4_files list if it exists
+    if let Some(idx) = fmp4_files.iter().position(|f| f.ends_with("_quarter_resolution.mp4")) {
+        fmp4_files.remove(idx);
     }
 
     println!("CREATED OGP VIDEO: {:?}", ogp_video_result);
 
-    // Clean up intermediate WebM files
-    println!("Remove WebM files...");
-    for file in webm_files {
+    // Clean up intermediate fMP4 files
+    println!("Remove fMP4 files...");
+    for file in fmp4_files {
         if let Err(e) = fs::remove_file(&file) {
-            eprintln!("Warning: Failed to delete intermediate WebM file {}: {}", file, e);
+            eprintln!("Warning: Failed to delete intermediate fMP4 file {}: {}", file, e);
         }
     }
 
-    // Clean up intermediate audio WebM files
-    println!("Remove audio WebM files...");
-    for (audio_file, _, _) in &audio_webm_files {
+    // Clean up intermediate audio fMP4 files
+    println!("Remove audio fMP4 files...");
+    for (audio_file, _, _) in &audio_fmp4_files {
         if let Err(e) = fs::remove_file(audio_file) {
-            eprintln!("Warning: Failed to delete intermediate audio WebM file {}: {}", audio_file, e);
+            eprintln!("Warning: Failed to delete intermediate audio fMP4 file {}: {}", audio_file, e);
         }
     }
 
