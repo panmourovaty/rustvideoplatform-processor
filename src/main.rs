@@ -3591,14 +3591,22 @@ async fn transcode_video(
 
     if audio_fmp4_files.len() <= 1 {
         // Single audio (or none): simple adaptation set
-        if !audio_fmp4_files.is_empty() {
-            adaptation_sets.push_str(&format!(" id=1,streams={}", num_video_outputs));
+        if let Some((_, language, _)) = audio_fmp4_files.get(0) {
+            let lang_tag = if language.is_empty() { "und" } else { language };
+            adaptation_sets.push_str(&format!(" id=1,streams={},lang={}", num_video_outputs, lang_tag));
         }
     } else {
         // Multiple audio streams: separate adaptation set per language
-        for (audio_idx, _audio_info) in audio_fmp4_files.iter().enumerate() {
+        for (audio_idx, (_, language, _)) in audio_fmp4_files.iter().enumerate() {
             let output_stream_idx = num_video_outputs + audio_idx;
-            adaptation_sets.push_str(&format!(" id={},streams={}", audio_idx + 1, output_stream_idx));
+            let lang_tag = if language.is_empty() { "und" } else { language };
+
+            adaptation_sets.push_str(&format!(
+                " id={},streams={},lang={}",
+                audio_idx + 1,
+                output_stream_idx,
+                lang_tag
+            ));
         }
     }
 
