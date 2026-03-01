@@ -3617,6 +3617,8 @@ async fn transcode_video(
          -window_size 0 -extra_window_size 0 \
          -copyts -avoid_negative_ts 1 \
          -adaptation_sets '{}' \
+         -hls_playlist 1 \
+         -hls_master_name '{}/video.m3u8' \
          -init_seg_name 'init_$RepresentationID$.mp4' \
          -media_seg_name 'chunk_$RepresentationID$_$Number$.m4s' \
          '{}/video.mpd'",
@@ -3625,6 +3627,7 @@ async fn transcode_video(
         metadata_args,
         config.dash.segment_duration,
         adaptation_sets,
+        dash_output_dir,
         dash_output_dir
     );
 
