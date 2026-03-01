@@ -3192,6 +3192,51 @@ fn format_timestamp_vtt(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, secs, millis)
 }
 
+/// Compute disambiguated audio track labels from (file_path, language, title) tuples.
+/// This is the single source of truth for audio track naming used by both the DASH
+/// post-processor and the HLS playlist generator, ensuring identical track names.
+///
+/// Rules:
+/// - Use title if non-empty, else language code, else "Track"
+/// - Duplicate labels get a "(2)", "(3)", … suffix: "eng", "eng (2)", "eng (3)"
+fn compute_audio_labels(audio_info: &[(String, String, String)]) -> Vec<String> {
+    let raw_labels: Vec<String> = audio_info
+        .iter()
+        .map(|(_, language, title)| {
+            if !title.is_empty() {
+                title.clone()
+            } else if !language.is_empty() {
+                language.clone()
+            } else {
+                "Track".to_string()
+            }
+        })
+        .collect();
+
+    let mut total_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for label in &raw_labels {
+        *total_count.entry(label.clone()).or_insert(0) += 1;
+    }
+
+    let mut seen_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    raw_labels
+        .iter()
+        .map(|label| {
+            if *total_count.get(label).unwrap_or(&1) > 1 {
+                let seen = seen_count.entry(label.clone()).or_insert(0);
+                *seen += 1;
+                if *seen == 1 {
+                    label.clone()
+                } else {
+                    format!("{} ({})", label, seen)
+                }
+            } else {
+                label.clone()
+            }
+        })
+        .collect()
+}
+
 fn post_process_dash_manifest(
     mpd_path: &str,
     audio_info: &[(String, String, String)], // Vec of (file_path, language, title)
@@ -3213,44 +3258,8 @@ fn post_process_dash_manifest(
         }
     };
 
-    // Pre-compute labels with disambiguation for duplicates.
-    // E.g., three "eng" tracks with no title become: "eng", "eng (2)", "eng (3)"
-    // Tracks with unique titles are left as-is.
-    let mut raw_labels: Vec<String> = Vec::with_capacity(audio_info.len());
-    for (_, language, title) in audio_info {
-        let label = if !title.is_empty() {
-            title.clone()
-        } else if !language.is_empty() {
-            language.clone()
-        } else {
-            format!("Track")
-        };
-        raw_labels.push(label);
-    }
-
-    // Count occurrences of each label and disambiguate duplicates
-    let mut labels: Vec<String> = Vec::with_capacity(raw_labels.len());
-    let mut seen_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    // First pass: count total occurrences of each label
-    let mut total_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for label in &raw_labels {
-        *total_count.entry(label.clone()).or_insert(0) += 1;
-    }
-    // Second pass: build disambiguated labels
-    for label in &raw_labels {
-        let count = *total_count.get(label).unwrap_or(&1);
-        if count > 1 {
-            let seen = seen_count.entry(label.clone()).or_insert(0);
-            *seen += 1;
-            if *seen == 1 {
-                labels.push(label.clone());
-            } else {
-                labels.push(format!("{} ({})", label, seen));
-            }
-        } else {
-            labels.push(label.clone());
-        }
-    }
+    // Pre-compute labels – shared logic with HLS generator guarantees identical names.
+    let labels = compute_audio_labels(audio_info);
 
     let mut result = String::with_capacity(mpd_content.len() + 512);
     let mut audio_adaptation_idx = 0;
@@ -3306,6 +3315,330 @@ fn post_process_dash_manifest(
     } else {
         println!("Post-processed MPD with {} audio label(s): {:?}", audio_adaptation_idx, labels);
     }
+}
+
+// ---------------------------------------------------------------------------
+// HLS manifest generation – shares CMAF segments with MPEG-DASH (CMAF for HLS)
+// ---------------------------------------------------------------------------
+
+struct HlsRepresentation {
+    id: String,
+    content_type: String, // "video" or "audio"
+    codecs: String,
+    width: Option<u32>,
+    height: Option<u32>,
+    bandwidth: u64,
+    timescale: u64,
+    template_duration: u64, // in timescale units; 0 if unknown
+    start_number: u64,
+}
+
+/// Extract a single XML attribute value from a tag string.
+/// Returns None if the attribute is absent.
+fn extract_xml_attr(tag: &str, attr: &str) -> Option<String> {
+    let pattern = format!("{}=\"", attr);
+    let idx = tag.find(&pattern)? + pattern.len();
+    let end = tag[idx..].find('"')? + idx;
+    Some(tag[idx..end].to_string())
+}
+
+/// Parse an ISO 8601 duration string of the form "PT[H]H[M]M[S]S" into seconds.
+fn parse_iso8601_duration(s: &str) -> f64 {
+    let s = s.trim_start_matches("PT");
+    let mut total = 0.0f64;
+    let mut current = String::new();
+    for c in s.chars() {
+        match c {
+            'H' => {
+                if let Ok(v) = current.parse::<f64>() { total += v * 3600.0; }
+                current.clear();
+            }
+            'M' => {
+                if let Ok(v) = current.parse::<f64>() { total += v * 60.0; }
+                current.clear();
+            }
+            'S' => {
+                if let Ok(v) = current.parse::<f64>() { total += v; }
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    total
+}
+
+/// Count how many media segments exist for a given representation ID.
+/// Segments are named `chunk_<id>_<N>.m4s`.
+fn count_cmaf_segments(dash_output_dir: &str, rep_id: &str) -> u64 {
+    let prefix = format!("chunk_{}_", rep_id);
+    let mut count = 0u64;
+    if let Ok(entries) = fs::read_dir(dash_output_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) && name.ends_with(".m4s") {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Write an HLS media playlist (variant or audio) for one CMAF representation.
+/// The playlist references `init_<id>.mp4` and `chunk_<id>_<N>.m4s` – the same
+/// files already generated for MPEG-DASH.
+fn write_hls_media_playlist(
+    dash_output_dir: &str,
+    rep: &HlsRepresentation,
+    total_duration: f64,
+    target_duration: u64,
+) {
+    let seg_dur_secs = if rep.timescale > 0 && rep.template_duration > 0 {
+        rep.template_duration as f64 / rep.timescale as f64
+    } else {
+        10.0
+    };
+
+    let num_segments = count_cmaf_segments(dash_output_dir, &rep.id);
+    if num_segments == 0 {
+        eprintln!(
+            "Warning: no CMAF segments found for representation {}, skipping HLS playlist",
+            rep.id
+        );
+        return;
+    }
+
+    let mut pl = String::new();
+    pl.push_str("#EXTM3U\n");
+    pl.push_str("#EXT-X-VERSION:6\n");
+    pl.push_str(&format!("#EXT-X-TARGETDURATION:{}\n", target_duration));
+    pl.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
+    pl.push_str(&format!("#EXT-X-MAP:URI=\"init_{}.mp4\"\n", rep.id));
+
+    for i in 0..num_segments {
+        let seg_num = rep.start_number + i;
+        let dur = if i == num_segments - 1 && total_duration > 0.0 {
+            // Last segment may be shorter than the template duration
+            let elapsed = i as f64 * seg_dur_secs;
+            let remaining = total_duration - elapsed;
+            if remaining > 0.0 { remaining } else { seg_dur_secs }
+        } else {
+            seg_dur_secs
+        };
+        pl.push_str(&format!("#EXTINF:{:.6},\n", dur));
+        pl.push_str(&format!("chunk_{}_{}.m4s\n", rep.id, seg_num));
+    }
+    pl.push_str("#EXT-X-ENDLIST\n");
+
+    let path = format!("{}/hls_{}_{}.m3u8", dash_output_dir, rep.content_type, rep.id);
+    if let Err(e) = fs::write(&path, pl) {
+        eprintln!("Warning: failed to write HLS playlist {}: {}", path, e);
+    } else {
+        println!("Generated HLS playlist: {}", path);
+    }
+}
+
+/// Write the HLS master playlist (`video.m3u8`) that references all variant and
+/// audio playlists.  Audio track names are derived from `compute_audio_labels`
+/// so they are identical to the names written into the MPEG-DASH manifest.
+fn write_hls_master_playlist(
+    dash_output_dir: &str,
+    video_reps: &[HlsRepresentation],
+    audio_reps: &[HlsRepresentation],
+    audio_info: &[(String, String, String)], // (file_path, language, title)
+) {
+    let mut master = String::new();
+    master.push_str("#EXTM3U\n");
+    master.push_str("#EXT-X-VERSION:6\n");
+    master.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
+
+    // Compute audio labels using the same function as the DASH post-processor.
+    let audio_labels = compute_audio_labels(audio_info);
+
+    let has_audio = !audio_reps.is_empty();
+    let audio_group = "audio";
+
+    if has_audio {
+        master.push_str("\n");
+        for (idx, rep) in audio_reps.iter().enumerate() {
+            let (language, display_name) = if let Some((_, lang, title)) = audio_info.get(idx) {
+                let lang_tag = if !lang.is_empty() { lang.clone() } else { "und".to_string() };
+                // Use the same disambiguated label as DASH
+                let name = audio_labels
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Audio {}", idx + 1));
+                (lang_tag, name)
+            } else {
+                ("und".to_string(), format!("Audio {}", idx + 1))
+            };
+
+            let default_val = if idx == 0 { "YES" } else { "NO" };
+            master.push_str(&format!(
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",LANGUAGE=\"{}\",NAME=\"{}\",DEFAULT={},AUTOSELECT=YES,URI=\"hls_audio_{}.m3u8\"\n",
+                audio_group, language, display_name, default_val, rep.id
+            ));
+        }
+    }
+
+    master.push_str("\n");
+
+    // Video streams – highest bandwidth first
+    let mut sorted: Vec<&HlsRepresentation> = video_reps.iter().collect();
+    sorted.sort_by(|a, b| b.bandwidth.cmp(&a.bandwidth));
+
+    for rep in sorted {
+        let resolution = match (rep.width, rep.height) {
+            (Some(w), Some(h)) => format!(",RESOLUTION={}x{}", w, h),
+            _ => String::new(),
+        };
+
+        // Include both video and audio codecs in the CODECS attribute when an
+        // audio group is present, as recommended by RFC 8216 §4.4.6.2.
+        let codecs = if has_audio {
+            if let Some(ar) = audio_reps.first() {
+                format!("{},{}", rep.codecs, ar.codecs)
+            } else {
+                rep.codecs.clone()
+            }
+        } else {
+            rep.codecs.clone()
+        };
+
+        let audio_attr = if has_audio {
+            format!(",AUDIO=\"{}\"", audio_group)
+        } else {
+            String::new()
+        };
+
+        master.push_str(&format!(
+            "#EXT-X-STREAM-INF:BANDWIDTH={}{},CODECS=\"{}\"{}\n",
+            rep.bandwidth, resolution, codecs, audio_attr
+        ));
+        master.push_str(&format!("hls_video_{}.m3u8\n", rep.id));
+    }
+
+    let path = format!("{}/video.m3u8", dash_output_dir);
+    if let Err(e) = fs::write(&path, master) {
+        eprintln!("Warning: failed to write HLS master playlist: {}", e);
+    } else {
+        println!("Generated HLS master playlist: {}", path);
+    }
+}
+
+/// Generate HLS playlists that share CMAF segments with the MPEG-DASH manifest.
+/// Must be called after the DASH `video.mpd` has been written.
+fn generate_hls_manifests(
+    dash_output_dir: &str,
+    audio_info: &[(String, String, String)],
+) {
+    let mpd_path = format!("{}/video.mpd", dash_output_dir);
+    let mpd_content = match fs::read_to_string(&mpd_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: could not read MPD for HLS generation: {}", e);
+            return;
+        }
+    };
+
+    // --- Parse global duration attributes from the MPD header ---
+    let mut total_duration = 0.0f64;
+    if let Some(idx) = mpd_content.find("mediaPresentationDuration=\"") {
+        let rest = &mpd_content[idx + "mediaPresentationDuration=\"".len()..];
+        if let Some(end) = rest.find('"') {
+            total_duration = parse_iso8601_duration(&rest[..end]);
+        }
+    }
+
+    let mut max_seg_dur_secs = 0.0f64;
+    if let Some(idx) = mpd_content.find("maxSegmentDuration=\"") {
+        let rest = &mpd_content[idx + "maxSegmentDuration=\"".len()..];
+        if let Some(end) = rest.find('"') {
+            max_seg_dur_secs = parse_iso8601_duration(&rest[..end]);
+        }
+    }
+
+    // --- Parse representations (line-by-line; FFmpeg emits single-line elements) ---
+    let mut video_reps: Vec<HlsRepresentation> = Vec::new();
+    let mut audio_reps: Vec<HlsRepresentation> = Vec::new();
+
+    let mut cur_content_type = String::new();
+    let mut cur_timescale: u64 = 90000;
+    let mut cur_template_dur: u64 = 0;
+    let mut cur_start_number: u64 = 0;
+
+    for line in mpd_content.lines() {
+        let t = line.trim();
+
+        if t.starts_with("<AdaptationSet") {
+            if let Some(ct) = extract_xml_attr(t, "contentType") {
+                cur_content_type = ct;
+            }
+        }
+
+        if t.starts_with("<SegmentTemplate") {
+            if let Some(v) = extract_xml_attr(t, "timescale") {
+                cur_timescale = v.parse().unwrap_or(90000);
+            }
+            if let Some(v) = extract_xml_attr(t, "duration") {
+                cur_template_dur = v.parse().unwrap_or(0);
+            }
+            if let Some(v) = extract_xml_attr(t, "startNumber") {
+                cur_start_number = v.parse().unwrap_or(0);
+            }
+        }
+
+        if t.starts_with("<Representation") {
+            let rep = HlsRepresentation {
+                id:               extract_xml_attr(t, "id").unwrap_or_default(),
+                content_type:     cur_content_type.clone(),
+                codecs:           extract_xml_attr(t, "codecs").unwrap_or_default(),
+                width:            extract_xml_attr(t, "width").and_then(|v| v.parse().ok()),
+                height:           extract_xml_attr(t, "height").and_then(|v| v.parse().ok()),
+                bandwidth:        extract_xml_attr(t, "bandwidth").and_then(|v| v.parse().ok()).unwrap_or(0),
+                timescale:        cur_timescale,
+                template_duration: cur_template_dur,
+                start_number:     cur_start_number,
+            };
+            match cur_content_type.as_str() {
+                "video" => video_reps.push(rep),
+                "audio" => audio_reps.push(rep),
+                _       => {}
+            }
+        }
+    }
+
+    if video_reps.is_empty() {
+        eprintln!("Warning: no video representations found in MPD, skipping HLS generation");
+        return;
+    }
+
+    // HLS TARGETDURATION: use maxSegmentDuration from MPD when available, else
+    // derive from the first video representation's template duration + 1s margin.
+    let target_duration: u64 = if max_seg_dur_secs > 0.0 {
+        max_seg_dur_secs.ceil() as u64
+    } else if let Some(r) = video_reps.first() {
+        if r.timescale > 0 && r.template_duration > 0 {
+            (r.template_duration as f64 / r.timescale as f64).ceil() as u64 + 1
+        } else {
+            11
+        }
+    } else {
+        11
+    };
+
+    println!(
+        "Generating HLS manifests: {} video reps, {} audio reps, \
+         total duration {:.3}s, target segment duration {}s",
+        video_reps.len(), audio_reps.len(), total_duration, target_duration
+    );
+
+    for rep in &video_reps {
+        write_hls_media_playlist(dash_output_dir, rep, total_duration, target_duration);
+    }
+    for rep in &audio_reps {
+        write_hls_media_playlist(dash_output_dir, rep, total_duration, target_duration);
+    }
+    write_hls_master_playlist(dash_output_dir, &video_reps, &audio_reps, audio_info);
 }
 
 async fn transcode_video(
@@ -3645,6 +3978,9 @@ async fn transcode_video(
     // Post-process MPD to add <Label> and <Role> elements for audio track selection
     let mpd_path = format!("{}/video.mpd", dash_output_dir);
     post_process_dash_manifest(&mpd_path, &audio_fmp4_files);
+
+    // Generate HLS playlists that share the same CMAF segments as MPEG-DASH
+    generate_hls_manifests(&dash_output_dir, &audio_fmp4_files);
 
     //OGP video - find quarter_resolution dynamically
     let ogp_source = format!("{}/output_quarter_resolution.mp4", output_dir);
