@@ -3196,6 +3196,96 @@ fn format_timestamp_vtt(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, secs, millis)
 }
 
+fn compute_audio_labels(audio_info: &[(String, String, String)]) -> Vec<String> {
+    let mut raw_labels: Vec<String> = Vec::with_capacity(audio_info.len());
+    for (_, language, title) in audio_info {
+        let label = if !title.is_empty() {
+            title.clone()
+        } else if !language.is_empty() {
+            language.clone()
+        } else {
+            "Track".to_string()
+        };
+        raw_labels.push(label);
+    }
+
+    let mut labels: Vec<String> = Vec::with_capacity(raw_labels.len());
+    let mut total_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for label in &raw_labels {
+        *total_count.entry(label.clone()).or_insert(0) += 1;
+    }
+    let mut seen_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for label in &raw_labels {
+        let count = *total_count.get(label).unwrap_or(&1);
+        if count > 1 {
+            let seen = seen_count.entry(label.clone()).or_insert(0);
+            *seen += 1;
+            if *seen == 1 {
+                labels.push(label.clone());
+            } else {
+                labels.push(format!("{} ({})", label, seen));
+            }
+        } else {
+            labels.push(label.clone());
+        }
+    }
+    labels
+}
+
+fn post_process_hls_manifest(
+    m3u8_path: &str,
+    audio_info: &[(String, String, String)],
+) {
+    // Replace generic NAME="audio_X" with actual language/title labels in the HLS master playlist.
+    if audio_info.is_empty() {
+        return;
+    }
+
+    let content = match fs::read_to_string(m3u8_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: Could not read HLS master playlist for post-processing: {}", e);
+            return;
+        }
+    };
+
+    let labels = compute_audio_labels(audio_info);
+
+    let mut result = String::with_capacity(content.len());
+    let mut audio_idx = 0;
+
+    for line in content.lines() {
+        if line.contains("#EXT-X-MEDIA:") && line.contains("TYPE=AUDIO") && audio_idx < labels.len() {
+            // Replace NAME="audio_X" with NAME="<label>"
+            let mut new_line = String::new();
+            let name_prefix = "NAME=\"";
+            if let Some(name_start) = line.find(name_prefix) {
+                let after_name = name_start + name_prefix.len();
+                if let Some(name_end) = line[after_name..].find('"') {
+                    new_line.push_str(&line[..after_name]);
+                    new_line.push_str(&labels[audio_idx]);
+                    new_line.push_str(&line[after_name + name_end..]);
+                    result.push_str(&new_line);
+                } else {
+                    result.push_str(line);
+                }
+            } else {
+                result.push_str(line);
+            }
+            audio_idx += 1;
+        } else {
+            result.push_str(line);
+        }
+        result.push('\n');
+    }
+
+    if let Err(e) = fs::write(m3u8_path, result) {
+        eprintln!("Warning: Could not write post-processed HLS master playlist: {}", e);
+    } else {
+        println!("Post-processed HLS master playlist with {} audio label(s): {:?}", audio_idx, labels);
+    }
+}
+
 fn post_process_dash_manifest(
     mpd_path: &str,
     audio_info: &[(String, String, String)], // Vec of (file_path, language, title)
@@ -3217,44 +3307,7 @@ fn post_process_dash_manifest(
         }
     };
 
-    // Pre-compute labels with disambiguation for duplicates.
-    // E.g., three "eng" tracks with no title become: "eng", "eng (2)", "eng (3)"
-    // Tracks with unique titles are left as-is.
-    let mut raw_labels: Vec<String> = Vec::with_capacity(audio_info.len());
-    for (_, language, title) in audio_info {
-        let label = if !title.is_empty() {
-            title.clone()
-        } else if !language.is_empty() {
-            language.clone()
-        } else {
-            format!("Track")
-        };
-        raw_labels.push(label);
-    }
-
-    // Count occurrences of each label and disambiguate duplicates
-    let mut labels: Vec<String> = Vec::with_capacity(raw_labels.len());
-    let mut seen_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    // First pass: count total occurrences of each label
-    let mut total_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for label in &raw_labels {
-        *total_count.entry(label.clone()).or_insert(0) += 1;
-    }
-    // Second pass: build disambiguated labels
-    for label in &raw_labels {
-        let count = *total_count.get(label).unwrap_or(&1);
-        if count > 1 {
-            let seen = seen_count.entry(label.clone()).or_insert(0);
-            *seen += 1;
-            if *seen == 1 {
-                labels.push(label.clone());
-            } else {
-                labels.push(format!("{} ({})", label, seen));
-            }
-        } else {
-            labels.push(label.clone());
-        }
-    }
+    let labels = compute_audio_labels(audio_info);
 
     let mut result = String::with_capacity(mpd_content.len() + 512);
     let mut audio_adaptation_idx = 0;
@@ -3648,6 +3701,10 @@ async fn transcode_video(
     // Post-process MPD to add <Label> and <Role> elements for audio track selection
     let mpd_path = format!("{}/video.mpd", dash_output_dir);
     post_process_dash_manifest(&mpd_path, &audio_fmp4_files);
+
+    // Post-process HLS master playlist to replace generic audio names with language labels
+    let m3u8_path = format!("{}/video.m3u8", dash_output_dir);
+    post_process_hls_manifest(&m3u8_path, &audio_fmp4_files);
 
     //OGP video - find quarter_resolution dynamically
     let ogp_source = format!("{}/output_quarter_resolution.mp4", output_dir);
