@@ -3590,27 +3590,16 @@ async fn transcode_video(
     let mut adaptation_sets = String::from("id=0,streams=v");
 
     if audio_fmp4_files.len() <= 1 {
-        // Single audio (or none): simple adaptation set
-        if let Some((_, language, _)) = audio_fmp4_files.get(0) {
-            let lang_tag = if language.is_empty() { "und" } else { language };
-            adaptation_sets.push_str(&format!(" id=1,streams={},lang={}", num_video_outputs, lang_tag));
+        if !audio_fmp4_files.is_empty() {
+            adaptation_sets.push_str(&format!(" id=1,streams={}", num_video_outputs));
         }
     } else {
-        // Multiple audio streams: separate adaptation set per language
-        for (audio_idx, (_, language, _)) in audio_fmp4_files.iter().enumerate() {
+        for (audio_idx, _) in audio_fmp4_files.iter().enumerate() {
             let output_stream_idx = num_video_outputs + audio_idx;
-            let lang_tag = if language.is_empty() { "und" } else { language };
-
-            adaptation_sets.push_str(&format!(
-                " id={},streams={},lang={}",
-                audio_idx + 1,
-                output_stream_idx,
-                lang_tag
-            ));
+            adaptation_sets.push_str(&format!(" id={},streams={}", audio_idx + 1, output_stream_idx));
         }
     }
 
-    // Build language metadata for audio streams
     let mut metadata_args = String::new();
     for (audio_idx, (_, language, _)) in audio_fmp4_files.iter().enumerate() {
         if !language.is_empty() {
@@ -3621,8 +3610,8 @@ async fn transcode_video(
     }
 
     let dash_output_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M {} {}{} \
-         -c copy -map_metadata -1 \
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M {} {} \
+         -c copy -map_metadata -1 {} \
          -f dash -dash_segment_type mp4 \
          -use_template 1 -use_timeline 1 \
          -seg_duration {} \
