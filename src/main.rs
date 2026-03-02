@@ -2256,17 +2256,53 @@ fn strip_list_prefix(text: &str) -> &str {
     text
 }
 
+fn lang_code_to_name(code: &str) -> &'static str {
+    match code.to_lowercase().as_str() {
+        "en" => "English", "cs" => "Czech", "de" => "German", "fr" => "French",
+        "es" => "Spanish", "it" => "Italian", "pt" => "Portuguese", "ru" => "Russian",
+        "ja" => "Japanese", "ko" => "Korean", "zh" => "Chinese", "ar" => "Arabic",
+        "hi" => "Hindi", "pl" => "Polish", "nl" => "Dutch", "sv" => "Swedish",
+        "da" => "Danish", "no" => "Norwegian", "fi" => "Finnish", "hu" => "Hungarian",
+        "tr" => "Turkish", "el" => "Greek", "he" => "Hebrew", "th" => "Thai",
+        "vi" => "Vietnamese", "id" => "Indonesian", "ms" => "Malay", "uk" => "Ukrainian",
+        "ro" => "Romanian", "bg" => "Bulgarian", "hr" => "Croatian", "sk" => "Slovak",
+        "sl" => "Slovenian", "sr" => "Serbian", "lt" => "Lithuanian", "lv" => "Latvian",
+        "et" => "Estonian", "ca" => "Catalan", "gl" => "Galician", "eu" => "Basque",
+        "cy" => "Welsh", "ga" => "Irish", "is" => "Icelandic", "mk" => "Macedonian",
+        "sq" => "Albanian", "bs" => "Bosnian", "mt" => "Maltese", "lb" => "Luxembourgish",
+        "af" => "Afrikaans", "sw" => "Swahili", "tl" => "Filipino", "bn" => "Bengali",
+        "ta" => "Tamil", "te" => "Telugu", "ml" => "Malayalam", "kn" => "Kannada",
+        "gu" => "Gujarati", "mr" => "Marathi", "ne" => "Nepali", "si" => "Sinhala",
+        "km" => "Khmer", "lo" => "Lao", "my" => "Burmese", "ka" => "Georgian",
+        "am" => "Amharic", "fa" => "Persian", "ur" => "Urdu", "ps" => "Pashto",
+        "ku" => "Kurdish", "la" => "Latin", "eo" => "Esperanto",
+        _ => code,
+    }
+}
+
 fn translate_text_via_llama(
     client: &Client,
     text: &str,
+    source_lang: &str,
     target_lang: &str,
     llama_url: &str,
 ) -> Option<String> {
     let single_line = text.replace('\n', " ");
 
+    let source_name = lang_code_to_name(source_lang);
+    let target_name = lang_code_to_name(target_lang);
+
+    let system_prompt_content = format!(
+        "You are a professional {} ({}) to {} ({}) translator. Your goal is to accurately convey the meaning and nuances of the original {} text while adhering to {} grammar, vocabulary, and cultural sensitivities.\nProduce only the {} translation, without any additional explanations or commentary. Please translate the following {} text into {}:\n\n\n{}",
+        source_name, source_lang, target_name, target_lang,
+        source_name, target_name,
+        target_name, source_name, target_name,
+        single_line
+    );
+
     let prompt = format!(
-        "<start_of_turn>user\nTranslate the following to {}. Output ONLY the translated text, no explanations or alternatives:\n{}<end_of_turn>\n<start_of_turn>model\n",
-        target_lang, single_line
+        "<start_of_turn>system\n{}<end_of_turn>\n<start_of_turn>model\n",
+        system_prompt_content
     );
 
     let body = json!({
@@ -2344,7 +2380,7 @@ fn translate_subtitle_file(
 
     for (i, cue) in cues.iter().enumerate() {
         let translated_text = translate_text_via_llama(
-            &client, &cue.text, target_lang, &translation_config.llama_url,
+            &client, &cue.text, source_lang, target_lang, &translation_config.llama_url,
         );
 
         match translated_text {
