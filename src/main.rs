@@ -2256,7 +2256,7 @@ fn strip_list_prefix(text: &str) -> &str {
     text
 }
 
-fn lang_code_to_name(code: &str) -> &'static str {
+fn lang_code_to_name(code: &str) -> String {
     match code.to_lowercase().as_str() {
         "en" => "English", "cs" => "Czech", "de" => "German", "fr" => "French",
         "es" => "Spanish", "it" => "Italian", "pt" => "Portuguese", "ru" => "Russian",
@@ -2277,7 +2277,8 @@ fn lang_code_to_name(code: &str) -> &'static str {
         "am" => "Amharic", "fa" => "Persian", "ur" => "Urdu", "ps" => "Pashto",
         "ku" => "Kurdish", "la" => "Latin", "eo" => "Esperanto",
         _ => code,
-    }
+    };
+    code.to_owned()
 }
 
 fn translate_text_via_llama(
