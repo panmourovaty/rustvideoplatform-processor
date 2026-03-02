@@ -2281,9 +2281,6 @@ fn lang_code_to_name(code: &str) -> String {
     code.to_owned()
 }
 
-use reqwest::blocking::Client;
-use serde_json::json;
-
 fn translate_text_via_llama(
     client: &Client,
     text: &str,
