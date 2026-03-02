@@ -2281,36 +2281,30 @@ fn lang_code_to_name(code: &str) -> String {
     code.to_owned()
 }
 
+use reqwest::blocking::Client;
+use serde_json::json;
+
 fn translate_text_via_llama(
     client: &Client,
     text: &str,
-    source_lang: &str,
     target_lang: &str,
     llama_url: &str,
 ) -> Option<String> {
     let single_line = text.replace('\n', " ");
 
-    let source_name = lang_code_to_name(source_lang);
-    let target_name = lang_code_to_name(target_lang);
-
-    let system_prompt_content = format!(
-        "You are a professional {} ({}) to {} ({}) translator. Your goal is to accurately convey the meaning and nuances of the original {} text while adhering to {} grammar, vocabulary, and cultural sensitivities.\nProduce only the {} translation, without any additional explanations or commentary. Please translate the following {} text into {}:\n\n\n{}",
-        source_name, source_lang, target_name, target_lang,
-        source_name, target_name,
-        target_name, source_name, target_name,
-        single_line
-    );
-
     let prompt = format!(
-        "<start_of_turn>system\n{}<end_of_turn>\n<start_of_turn>model\n",
-        system_prompt_content
+        "Translate the following segment into {}, without additional explanation.\n\n{}",
+        target_lang, single_line
     );
 
     let body = json!({
         "prompt": prompt,
         "n_predict": 1024,
-        "temperature": 0.1,
-        "stop": ["<end_of_turn>", "<start_of_turn>", "\n\n"],
+        "temperature": 0.0,
+        "top_p": 0.6,
+        "top_k": 20,
+        "repeat_penalty": 1.05,
+        "stop": ["\n\n", "</s>"],
         "cache_prompt": true
     });
 
@@ -2333,10 +2327,15 @@ fn translate_text_via_llama(
 
     let json: serde_json::Value = response.json().ok()?;
 
-    json.get("content")
-        .and_then(|v| v.as_str())
-        .map(|s| strip_translation_preamble(s))
-        .filter(|s| !s.is_empty())
+    let translated_text = json.get("content")
+        .and_then(|v| v.as_str())?
+        .trim();
+
+    if translated_text.is_empty() {
+        None
+    } else {
+        Some(translated_text.to_string())
+    }
 }
 
 fn translate_subtitle_file(
@@ -2381,7 +2380,7 @@ fn translate_subtitle_file(
 
     for (i, cue) in cues.iter().enumerate() {
         let translated_text = translate_text_via_llama(
-            &client, &cue.text, source_lang, target_lang, &translation_config.llama_url,
+            &client, &cue.text, target_lang, &translation_config.llama_url,
         );
 
         match translated_text {
