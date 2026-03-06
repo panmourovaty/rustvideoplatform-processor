@@ -1033,7 +1033,7 @@ fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfC
 
     // Generate thumbnail.avif and thumbnail.jpg using ffmpeg (consistent with other pipelines)
     let avif_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
         temp_png, pdf_config.thumbnail_crf, thumb_width, thumb_height, output_dir
     );
     let jpg_cmd = format!(
@@ -2597,11 +2597,11 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
 
     // Run all three picture transcodes in parallel
     let transcode_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 -update 1 '{}/picture.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=iw:ih:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/picture.avif'",
         input_file, picture_config.crf, output_dir
     );
     let thumbnail_cmd = format!(
-            "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
+            "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
             input_file, picture_config.thumbnail_crf, thumb_width, thumb_height, output_dir
         );
     let thumbnail_ogp_cmd = format!(
@@ -2609,7 +2609,7 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
         input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
     let thumbnail_small_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=200:200:force_original_aspect_ratio=increase,crop=200:200,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail-small.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=200:200:force_original_aspect_ratio=increase:in_range=full:out_range=full,crop=200:200,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail-small.avif'",
         input_file, picture_config.thumbnail_crf, output_dir
     );
 
@@ -2881,11 +2881,11 @@ async fn extract_secondary_video_as_cover(
 
     // Run all three cover extractions in parallel
     let cover_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 -update 1 '{}/picture.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=iw:ih:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/picture.avif'",
         input_file, stream_selector, picture_config.cover_crf, output_dir
     );
     let thumbnail_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
         input_file, stream_selector, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, output_dir
     );
     let thumbnail_jpg_cmd = format!(
@@ -2930,11 +2930,11 @@ async fn extract_album_cover(input_file: &str, output_dir: &str, picture_config:
 
     // Run all three cover extractions in parallel
     let cover_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -b:v 0 -frames:v 1 -f image2 -update 1 '{}/picture.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=iw:ih:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/picture.avif'",
         input_file, picture_config.cover_crf, output_dir
     );
     let thumbnail_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
         input_file, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, output_dir
     );
     let thumbnail_jpg_cmd = format!(
