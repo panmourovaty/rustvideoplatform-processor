@@ -2597,19 +2597,19 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
 
     // Run all three picture transcodes in parallel
     let transcode_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=iw:ih:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/picture.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale=iw:ih,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/picture.avif'",
         input_file, picture_config.crf, output_dir
     );
     let thumbnail_cmd = format!(
-            "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
-            input_file, picture_config.thumbnail_crf, thumb_width, thumb_height, output_dir
+            "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail.avif'",
+            input_file, thumb_width, thumb_height, picture_config.thumbnail_crf, output_dir
         );
     let thumbnail_ogp_cmd = format!(
         "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
         input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
     let thumbnail_small_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=200:200:force_original_aspect_ratio=increase:in_range=full:out_range=full,crop=200:200,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail-small.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale=200:200:force_original_aspect_ratio=increase,crop=200:200,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail-small.avif'",
         input_file, picture_config.thumbnail_crf, output_dir
     );
 
