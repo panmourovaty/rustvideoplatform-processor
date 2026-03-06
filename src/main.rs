@@ -2609,7 +2609,7 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
         input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
     let thumbnail_small_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=200:200:force_original_aspect_ratio=increase,crop=200:200,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail-small.avif'",
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=200:200:force_original_aspect_ratio=increase,crop=200:200,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail-small.avif'",
         input_file, picture_config.thumbnail_crf, output_dir
     );
 
