@@ -2608,8 +2608,12 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
         "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -q:v {} '{}/thumbnail.jpg'",
         input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
     );
+    let thumbnail_small_cmd = format!(
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=200:200:force_original_aspect_ratio=increase,crop=200:200,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 '{}/thumbnail-small.avif'",
+        input_file, picture_config.thumbnail_crf, output_dir
+    );
 
-    let (r1, r2, r3) = tokio::join!(
+    let (r1, r2, r3, r4) = tokio::join!(
         task::spawn_blocking(move || {
             println!("Executing: {}", transcode_cmd);
             Command::new("sh").arg("-c").arg(&transcode_cmd).status()
@@ -2621,6 +2625,10 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
         task::spawn_blocking(move || {
             println!("Executing: {}", thumbnail_ogp_cmd);
             Command::new("sh").arg("-c").arg(&thumbnail_ogp_cmd).status()
+        }),
+        task::spawn_blocking(move || {
+            println!("Executing: {}", thumbnail_small_cmd);
+            Command::new("sh").arg("-c").arg(&thumbnail_small_cmd).status()
         })
     );
 
@@ -2643,6 +2651,13 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
         Ok(Ok(s)) if s.success() => {}
         _ => {
             eprintln!("Failed to transcode picture thumbnail JPG");
+            return Err(ffmpeg_next::Error::External);
+        }
+    }
+    match r4 {
+        Ok(Ok(s)) if s.success() => {}
+        _ => {
+            eprintln!("Failed to transcode picture thumbnail-small AVIF");
             return Err(ffmpeg_next::Error::External);
         }
     }
