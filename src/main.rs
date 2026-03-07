@@ -773,13 +773,17 @@ async fn process(pool: PgPool, config: Config) {
                 continue;
             }
 
-            let detected_type = detect_file_type(&input_file);
-
-            // Override database type if detection yields different result
-            let actual_type = if let Some(dt) = detected_type {
-                dt
-            } else {
+            // For special types like vtt_translate, skip file type detection
+            let actual_type = if concept.r#type == "vtt_translate" {
                 concept.r#type.clone()
+            } else {
+                let detected_type = detect_file_type(&input_file);
+                // Override database type if detection yields different result
+                if let Some(dt) = detected_type {
+                    dt
+                } else {
+                    concept.r#type.clone()
+                }
             };
 
             let process_result: Result<(), String> = if actual_type == "video" {
@@ -802,6 +806,11 @@ async fn process(pool: PgPool, config: Config) {
                 process_document_pdf(concept.id.clone(), pool.clone(), &config.pdf)
                     .await
                     .map_err(|e| format!("document_pdf processing failed: {}", e))
+            } else if actual_type == "vtt_translate" {
+                println!("processing concept: {} as vtt_translate", concept.id);
+                process_vtt_translate(concept.id.clone(), pool.clone(), &config.translation)
+                    .await
+                    .map_err(|e| format!("vtt_translate processing failed: {}", e))
             } else {
                 eprintln!(
                     "Unknown media type '{}' for concept {}, marking as processed",
@@ -890,6 +899,97 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
             Ok(())
         }
         Err(e) => Err(format!("Video transcode failed: {}", e)),
+    }
+}
+
+async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_config: &TranslationConfig) -> Result<(), String> {
+    let meta_path = format!("upload/{}", concept_id);
+    let meta_str = fs::read_to_string(&meta_path)
+        .map_err(|e| format!("Failed to read vtt_translate metadata: {}", e))?;
+
+    #[derive(Deserialize)]
+    struct VttTranslateMeta {
+        medium_id: String,
+        source_label: String,
+        target_language: String,
+    }
+
+    let meta: VttTranslateMeta = serde_json::from_str(&meta_str)
+        .map_err(|e| format!("Failed to parse vtt_translate metadata: {}", e))?;
+
+    let captions_dir = format!("source/{}/captions", meta.medium_id);
+    let source_path = format!("{}/{}.vtt", captions_dir, meta.source_label);
+
+    if !std::path::Path::new(&source_path).exists() {
+        let _ = fs::remove_file(&meta_path);
+        sqlx::query("DELETE FROM media_concepts WHERE id = $1;")
+            .bind(&concept_id)
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Database delete error: {}", e))?;
+        return Err(format!("Source subtitle file not found: {}", source_path));
+    }
+
+    let output_label = format!("AI_{}", meta.target_language);
+    let output_path = format!("{}/{}.vtt", captions_dir, output_label);
+
+    let source_lang = meta.source_label.clone();
+    let target_lang = meta.target_language.clone();
+    let tc = translation_config.clone();
+
+    let success = task::spawn_blocking(move || {
+        translate_subtitle_file(
+            &source_path,
+            &source_lang,
+            &target_lang,
+            &output_path,
+            &tc,
+        )
+    })
+    .await
+    .map_err(|e| format!("Translation task failed: {}", e))?;
+
+    if success {
+        // Update list.txt to include the new translation
+        let list_path = format!("{}/list.txt", captions_dir);
+        let mut existing: Vec<String> = if std::path::Path::new(&list_path).exists() {
+            fs::read_to_string(&list_path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let new_entry = format!("{}.vtt", output_label);
+        // Remove old entry for same label if exists
+        let label_prefix = format!("{}.", output_label);
+        existing.retain(|e| e.as_str() != output_label && !e.starts_with(&label_prefix));
+        existing.push(new_entry);
+
+        let list_content = existing.join("\n") + "\n";
+        let _ = fs::write(&list_path, list_content);
+
+        println!(
+            "VTT translation complete: {} -> {} for medium {}",
+            meta.source_label, output_label, meta.medium_id
+        );
+    }
+
+    // Clean up and mark as processed
+    let _ = fs::remove_file(&meta_path);
+    sqlx::query("DELETE FROM media_concepts WHERE id = $1;")
+        .bind(&concept_id)
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("Database delete error: {}", e))?;
+
+    if success {
+        Ok(())
+    } else {
+        Err("Translation failed".to_string())
     }
 }
 
@@ -1591,15 +1691,8 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
         }
     }
 
-    // Translate missing languages if translation is configured
-    if translation_enabled && !available_subs.is_empty() {
-        let all_names = ensure_configured_languages(&captions_dir, &available_subs, translation_config);
-        create_list_txt(&captions_dir, &all_names);
-        all_names
-    } else {
-        create_list_txt(&captions_dir, &saved_files);
-        saved_files
-    }
+    create_list_txt(&captions_dir, &saved_files);
+    saved_files
 }
 
 /// Probe audio duration from a media file.
@@ -1934,32 +2027,12 @@ fn whisper_transcribe_file(audio_path: &str, whisper_config: &WhisperConfig, tim
 /// Audio is optimized for whisper.cpp (16 kHz, mono, PCM_s16le).
 /// Long files are split at silence boundaries with a target of 10 minutes per chunk
 /// and a maximum of 15 minutes to avoid cutting through speech.
-fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig, translation_config: &TranslationConfig) -> Vec<String> {
+fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig, _translation_config: &TranslationConfig) -> Vec<String> {
     let captions_dir = format!("{}/captions", output_dir);
     fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
 
-    let translation_enabled = !translation_config.languages.is_empty();
-
-    // Detect language if translation is enabled
-    let detected_lang = if translation_enabled {
-        println!("Detecting audio language via Whisper...");
-        let lang = detect_language_via_whisper(input_file, output_dir, whisper_config);
-        if let Some(ref l) = lang {
-            println!("Detected audio language: {}", l);
-        } else {
-            println!("Language detection failed or unavailable.");
-        }
-        lang
-    } else {
-        None
-    };
-
     // Use AI_<detected_lang> naming when translation is enabled, otherwise use config output_label
-    let output_label = if let Some(ref lang) = detected_lang {
-        format!("AI_{}", lang)
-    } else {
-        whisper_config.output_label.clone()
-    };
+    let output_label = whisper_config.output_label.clone();
 
     let duration = probe_audio_duration(input_file);
 
@@ -2078,19 +2151,8 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             }
         }
 
-        // Translate missing languages if translation is configured
-        if translation_enabled && !saved_files.is_empty() {
-            let available_subs: Vec<(String, Option<String>)> = saved_files
-                .iter()
-                .map(|name| (name.clone(), detected_lang.clone()))
-                .collect();
-            let all_names = ensure_configured_languages(&captions_dir, &available_subs, translation_config);
-            create_list_txt(&captions_dir, &all_names);
-            all_names
-        } else {
-            create_list_txt(&captions_dir, &saved_files);
-            saved_files
-        }
+        create_list_txt(&captions_dir, &saved_files);
+        saved_files
     } else {
         // Short audio (under target chunk size): single-file path
         let temp_audio = format!("{}/temp_audio.wav", captions_dir);
@@ -2128,19 +2190,8 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
 
         let _ = fs::remove_file(&temp_audio);
 
-        // Translate missing languages if translation is configured
-        if translation_enabled && !saved_files.is_empty() {
-            let available_subs: Vec<(String, Option<String>)> = saved_files
-                .iter()
-                .map(|name| (name.clone(), detected_lang.clone()))
-                .collect();
-            let all_names = ensure_configured_languages(&captions_dir, &available_subs, translation_config);
-            create_list_txt(&captions_dir, &all_names);
-            all_names
-        } else {
-            create_list_txt(&captions_dir, &saved_files);
-            saved_files
-        }
+        create_list_txt(&captions_dir, &saved_files);
+        saved_files
     }
 }
 
