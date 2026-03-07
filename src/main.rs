@@ -322,8 +322,8 @@ struct ThumbnailConfig {
     height: u32,
 }
 
-fn default_thumbnail_width() -> u32 { 1920 }
-fn default_thumbnail_height() -> u32 { 1080 }
+fn default_thumbnail_width() -> u32 { 1280 }
+fn default_thumbnail_height() -> u32 { 720 }
 
 fn default_thumbnail_config() -> ThumbnailConfig {
     ThumbnailConfig {
@@ -856,6 +856,29 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
     let transcode_result: Result<(), String> = transcode_result.map_err(|e| format!("{}", e));
     match transcode_result {
         Ok(()) => {
+            // Check for custom thumbnail and apply it if present
+            let custom_thumbnail_path = format!("upload/{}_custom_thumbnail", concept_id);
+            if std::path::Path::new(&custom_thumbnail_path).exists() {
+                let output_dir_ct = output_dir.clone();
+                let w = config.thumbnail.width;
+                let h = config.thumbnail.height;
+                let ct_path = custom_thumbnail_path.clone();
+                let jpg_cmd = format!(
+                    "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -update 1 '{}/thumbnail.jpg'",
+                    ct_path, w, h, w, h, output_dir_ct
+                );
+                let avif_cmd = format!(
+                    "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p' -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -crf 28 -update 1 '{}/thumbnail.avif'",
+                    ct_path, w, h, w, h, output_dir_ct
+                );
+                let _ = task::spawn_blocking(move || {
+                    println!("Applying custom thumbnail: {}", ct_path);
+                    let _ = Command::new("sh").arg("-c").arg(&jpg_cmd).status();
+                    let _ = Command::new("sh").arg("-c").arg(&avif_cmd).status();
+                    let _ = fs::remove_file(&ct_path);
+                }).await;
+            }
+
             sqlx::query!(
                 "UPDATE media_concepts SET processed = true WHERE id = $1;",
                 concept_id
