@@ -1419,7 +1419,7 @@ fn detect_language_via_whisper(input_file: &str, output_dir: &str, whisper_confi
         }
     };
 
-    let response = client.post(&whisper_config.url.unwrap()).multipart(form).send();
+    let response = client.post(&whisper_config.url.clone().unwrap()).multipart(form).send();
     let _ = fs::remove_file(&temp_audio);
 
     match response {
@@ -1453,7 +1453,7 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
 
     // FALLBACK LOGIC: If no subtitles exist in the file, use Whisper.cpp
     if subtitle_streams.is_empty() && whisper_config.url.is_some() {
-        println!("No built-in subtitles found. Falling back to Whisper.cpp on {}...", whisper_config.url.unwrap().as_ref().unwrap());
+        println!("No built-in subtitles found. Falling back to Whisper.cpp on {}...", whisper_config.url.as_deref().unwrap());
         return generate_whisper_vtt(input_file, output_dir, whisper_config, translation_config);
     }
 
@@ -1894,7 +1894,7 @@ fn whisper_transcribe_file(audio_path: &str, whisper_config: &WhisperConfig, tim
         .build()
         .unwrap();
 
-    match client.post(&whisper_config.url.unwrap()).multipart(form).send() {
+    match client.post(&whisper_config.url.clone().unwrap()).multipart(form).send() {
         Ok(res) if res.status().is_success() => res.text().ok(),
         Ok(res) => {
             println!("Whisper API returned an error: {}", res.status());
@@ -2021,7 +2021,7 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             let chunk_timeout = (chunk_duration * 2.0).ceil() as u64;
             println!(
                 "Transcribing chunk {}/{} (offset {:.0}s, duration {:.0}s) via Whisper.cpp at {}...",
-                i + 1, chunk_files.len(), offset_secs, chunk_duration, whisper_config.url.unwrap()
+                i + 1, chunk_files.len(), offset_secs, chunk_duration, whisper_config.url.clone().unwrap()
             );
 
             if let Some(vtt_text) = whisper_transcribe_file(chunk_path, whisper_config, chunk_timeout) {
@@ -2090,7 +2090,7 @@ fn generate_whisper_vtt(input_file: &str, output_dir: &str, whisper_config: &Whi
             return Vec::new();
         }
 
-        println!("Sending audio to Whisper.cpp API at {} (timeout: {}s)...", whisper_config.url.unwrap(), timeout_secs);
+        println!("Sending audio to Whisper.cpp API at {} (timeout: {}s)...", whisper_config.url.clone().unwrap(), timeout_secs);
 
         let mut saved_files = Vec::new();
 
