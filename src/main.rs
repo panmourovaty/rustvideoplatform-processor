@@ -1032,8 +1032,8 @@ fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfC
 
     // Generate thumbnail.avif and thumbnail.jpg using ffmpeg (consistent with other pipelines)
     let avif_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
-        temp_png, pdf_config.thumbnail_crf, thumb_width, thumb_height, output_dir
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail.avif'",
+        temp_png, thumb_width, thumb_height, pdf_config.thumbnail_crf, output_dir
     );
     let jpg_cmd = format!(
         "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
