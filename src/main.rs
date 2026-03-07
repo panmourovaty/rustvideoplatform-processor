@@ -3753,32 +3753,6 @@ async fn transcode_video(
     let m3u8_path = format!("{}/video.m3u8", dash_output_dir);
     post_process_hls_manifest(&m3u8_path, &audio_fmp4_files);
 
-    //OGP video - find quarter_resolution dynamically
-    let ogp_source = format!("{}/output_quarter_resolution.mp4", output_dir);
-    let ogp_dest = format!("{}/video/video.mp4", output_dir);
-
-    let ogp_video_result = if fs::metadata(&ogp_source).is_ok() {
-        fs::rename(&ogp_source, &ogp_dest)
-    } else {
-        // Fallback: use the middle quality available
-        if !fmp4_files.is_empty() {
-            let middle_idx = fmp4_files.len() / 2;
-            let fallback_source = &fmp4_files[middle_idx];
-            let fallback_result = fs::rename(fallback_source, &ogp_dest);
-            fmp4_files.remove(middle_idx);
-            fallback_result
-        } else {
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No suitable OGP video found"))
-        }
-    };
-
-    // Remove quarter_resolution from fmp4_files list if it exists
-    if let Some(idx) = fmp4_files.iter().position(|f| f.ends_with("_quarter_resolution.mp4")) {
-        fmp4_files.remove(idx);
-    }
-
-    println!("CREATED OGP VIDEO: {:?}", ogp_video_result);
-
     // Clean up intermediate fMP4 files
     println!("Remove fMP4 files...");
     for file in fmp4_files {
