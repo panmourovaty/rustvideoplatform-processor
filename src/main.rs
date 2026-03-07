@@ -1032,12 +1032,12 @@ fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfC
 
     // Generate thumbnail.avif and thumbnail.jpg using ffmpeg (consistent with other pipelines)
     let avif_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail.avif'",
-        temp_png, thumb_width, thumb_height, pdf_config.thumbnail_crf, output_dir
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail.avif'",
+        temp_png, thumb_width, thumb_height, pdf_config.thumbnail_width, pdf_config.thumbnail_height, pdf_config.thumbnail_crf, output_dir
     );
     let jpg_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
-        temp_png, thumb_width, thumb_height, pdf_config.jpg_quality, output_dir
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
+        temp_png, thumb_width, thumb_height, pdf_config.thumbnail_width, pdf_config.thumbnail_height, pdf_config.jpg_quality, output_dir
     );
 
     println!("Executing: {}", avif_cmd);
@@ -2600,12 +2600,12 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
         input_file, picture_config.crf, output_dir
     );
     let thumbnail_cmd = format!(
-            "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail.avif'",
-            input_file, thumb_width, thumb_height, picture_config.thumbnail_crf, output_dir
+            "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail.avif'",
+            input_file, thumb_width, thumb_height, picture_config.thumbnail_width, picture_config.thumbnail_height, picture_config.thumbnail_crf, output_dir
         );
     let thumbnail_ogp_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
-        input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
+        input_file, thumb_width, thumb_height, picture_config.thumbnail_width, picture_config.thumbnail_height, picture_config.jpg_quality, output_dir
     );
     let thumbnail_small_cmd = format!(
         "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale=200:200:force_original_aspect_ratio=increase,crop=200:200,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail-small.avif'",
@@ -2884,12 +2884,12 @@ async fn extract_secondary_video_as_cover(
         input_file, stream_selector, picture_config.cover_crf, output_dir
     );
     let thumbnail_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
-        input_file, stream_selector, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, output_dir
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:{} -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
+        input_file, stream_selector, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, picture_config.thumbnail_width, picture_config.thumbnail_height, output_dir
     );
     let thumbnail_jpg_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
-        input_file, stream_selector, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:{} -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
+        input_file, stream_selector, thumb_width, thumb_height, picture_config.thumbnail_width, picture_config.thumbnail_height, picture_config.jpg_quality, output_dir
     );
 
     let (_, _, _) = tokio::join!(
@@ -2933,12 +2933,12 @@ async fn extract_album_cover(input_file: &str, output_dir: &str, picture_config:
         input_file, picture_config.cover_crf, output_dir
     );
     let thumbnail_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
-        input_file, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, output_dir
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale={}:{}:force_original_aspect_ratio=decrease:in_range=full:out_range=full,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p10le' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail.avif'",
+        input_file, picture_config.cover_thumbnail_crf, thumb_width, thumb_height, picture_config.thumbnail_width, picture_config.thumbnail_height, output_dir
     );
     let thumbnail_jpg_cmd = format!(
-        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
-        input_file, thumb_width, thumb_height, picture_config.jpg_quality, output_dir
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
+        input_file, thumb_width, thumb_height, picture_config.thumbnail_width, picture_config.thumbnail_height, picture_config.jpg_quality, output_dir
     );
 
     let (_, _, _) = tokio::join!(
@@ -3834,8 +3834,8 @@ async fn transcode_video(
 
     // JPG thumbnail
     let thumbnail_jpg_cmd = format!(
-        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -update 1 '{}/thumbnail.jpg'",
-        random_time, input_file, config.thumbnail.width, config.thumbnail.height, output_dir
+        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -update 1 '{}/thumbnail.jpg'",
+        random_time, input_file, config.thumbnail.width, config.thumbnail.height, config.thumbnail.width, config.thumbnail.height, output_dir
     );
     post_handles.push(task::spawn_blocking(move || {
         println!("Executing: {}", thumbnail_jpg_cmd);
@@ -3844,8 +3844,8 @@ async fn transcode_video(
 
     // AVIF thumbnail
     let thumbnail_avif_cmd = format!(
-        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease' -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -update 1 '{}/thumbnail.avif'",
-        random_time, input_file, config.thumbnail.width, config.thumbnail.height, output_dir
+        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -update 1 '{}/thumbnail.avif'",
+        random_time, input_file, config.thumbnail.width, config.thumbnail.height, config.thumbnail.width, config.thumbnail.height, output_dir
     );
     post_handles.push(task::spawn_blocking(move || {
         println!("Executing: {}", thumbnail_avif_cmd);
