@@ -869,8 +869,8 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
             let custom_thumbnail_path = format!("upload/{}_custom_thumbnail", concept_id);
             if std::path::Path::new(&custom_thumbnail_path).exists() {
                 let output_dir_ct = output_dir.clone();
-                let w = config.thumbnail.width;
-                let h = config.thumbnail.height;
+                let w = config.video.thumbnail.width;
+                let h = config.video.thumbnail.height;
                 let ct_path = custom_thumbnail_path.clone();
                 let jpg_cmd = format!(
                     "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -update 1 '{}/thumbnail.jpg'",
@@ -3198,7 +3198,7 @@ fn detect_hdr(input_file: &str) -> HdrInfo {
     hdr_info
 }
 
-fn build_encoder_params(config: &VideoConfig, framerate: f32, hdr_info: &HdrInfo) -> (String, String, String, EncoderType) {
+fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInfo) -> (String, String, String, EncoderType) {
         // Build tonemapping filter if HDR is detected
         let tonemap_filter = if hdr_info.is_hdr {
             println!("HDR detected: transfer={:?}, primaries={:?}, space={:?}",
