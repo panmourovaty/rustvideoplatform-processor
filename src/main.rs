@@ -2377,7 +2377,7 @@ fn translate_line_via_llama(
             {"role": "user", "content": user_message}
         ],
         "max_tokens": 256,
-        "temperature": 0.0,
+        "temperature": 0.1,
         "top_p": 0.95,
         "top_k": 40,
         "repeat_penalty": 1.1
