@@ -1570,6 +1570,114 @@ fn detect_language_via_whisper(input_file: &str, output_dir: &str, whisper_confi
     }
 }
 
+/// Check if a subtitle codec is an ASS/SSA format that should be preserved natively.
+fn is_ass_codec(codec: &str) -> bool {
+    let c = codec.to_lowercase();
+    c == "ass" || c == "ssa"
+}
+
+/// Probe and extract font attachments from a media file.
+/// Extracts the first TTF/OTF font attachment, converts to WOFF2, and saves as font.woff2.
+fn extract_embedded_fonts(input_file: &str, captions_dir: &str) {
+    // Use ffprobe to find attachment streams (fonts)
+    let probe = Command::new("ffprobe")
+        .arg("-v").arg("error")
+        .arg("-select_streams").arg("t")
+        .arg("-show_entries").arg("stream=index,codec_name:stream_tags=filename")
+        .arg("-of").arg("json")
+        .arg(input_file)
+        .output();
+
+    let probe_output = match probe {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_slice(&probe_output.stdout) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let streams = match parsed.get("streams").and_then(|s| s.as_array()) {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Find the first font attachment
+    let mut font_stream_idx: Option<u32> = None;
+    for stream in streams {
+        let codec = stream.get("codec_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let codec_lower = codec.to_lowercase();
+        if codec_lower == "ttf" || codec_lower == "otf" || codec_lower == "truetype"
+            || codec_lower == "opentype" {
+            if let Some(idx) = stream.get("index").and_then(|v| v.as_u64()) {
+                font_stream_idx = Some(idx as u32);
+                break;
+            }
+        }
+    }
+
+    let stream_idx = match font_stream_idx {
+        Some(idx) => idx,
+        None => return,
+    };
+
+    // Extract the font to a temporary file
+    let temp_font_path = format!("{}/temp_font.ttf", captions_dir);
+    let extract_result = Command::new("ffmpeg")
+        .arg("-nostdin")
+        .arg("-v").arg("error")
+        .arg("-dump_attachment:{}".replace("{}", &stream_idx.to_string()))
+        .arg(&temp_font_path)
+        .arg("-i").arg(input_file)
+        .arg("-y")
+        .output();
+
+    match extract_result {
+        Ok(output) if output.status.success() || std::path::Path::new(&temp_font_path).exists() => {
+            println!("Extracted embedded font from stream {}", stream_idx);
+        }
+        _ => {
+            let _ = fs::remove_file(&temp_font_path);
+            return;
+        }
+    }
+
+    // Check if the font file was actually created and has content
+    match fs::metadata(&temp_font_path) {
+        Ok(meta) if meta.len() > 0 => {}
+        _ => {
+            let _ = fs::remove_file(&temp_font_path);
+            return;
+        }
+    }
+
+    // Convert TTF/OTF to WOFF2
+    let font_data = match fs::read(&temp_font_path) {
+        Ok(d) => d,
+        Err(_) => {
+            let _ = fs::remove_file(&temp_font_path);
+            return;
+        }
+    };
+
+    let woff2_path = format!("{}/font.woff2", captions_dir);
+    match ttf2woff2::encode(&font_data, ttf2woff2::BrotliQuality::default()) {
+        Ok(woff2_data) => {
+            if fs::write(&woff2_path, &woff2_data).is_ok() {
+                println!("Converted embedded font to WOFF2: {}", woff2_path);
+            }
+        }
+        Err(e) => {
+            println!("Failed to convert embedded font to WOFF2: {:?}", e);
+        }
+    }
+
+    let _ = fs::remove_file(&temp_font_path);
+}
+
 fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: &WhisperConfig, translation_config: &TranslationConfig) -> Vec<String> {
     let subtitle_streams = probe_subtitle_streams(input_file);
     let translation_enabled = !translation_config.languages.is_empty();
@@ -1584,13 +1692,20 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
     let captions_dir = format!("{}/captions", output_dir);
     fs::create_dir_all(&captions_dir).expect("Failed to create captions directory");
 
+    // Check if any subtitle stream is ASS/SSA — if so, also extract embedded fonts
+    let has_ass = subtitle_streams.iter().any(|(_, _, _, codec)| is_ass_codec(codec));
+    if has_ass {
+        extract_embedded_fonts(input_file, &captions_dir);
+    }
+
     let mut saved_files: Vec<String> = Vec::new();
     let mut available_subs: Vec<(String, Option<String>)> = Vec::new(); // (filename, iso_lang_code)
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Precompute per-stream output file paths and names
-    // Tuple: (stream_idx, final_name, output_file, language, title, iso_code)
-    let mut outputs: Vec<(u32, String, String, String, String, Option<String>)> = Vec::new();
+    // Separate streams into ASS (preserved natively) and non-ASS (converted to VTT)
+    // Tuple: (stream_idx, final_name, output_file, language, title, iso_code, is_ass)
+    let mut ass_outputs: Vec<(u32, String, String, String, String, Option<String>)> = Vec::new();
+    let mut vtt_outputs: Vec<(u32, String, String, String, String, Option<String>)> = Vec::new();
 
     for (stream_idx, language, title, codec) in subtitle_streams {
         // Try to normalize language tag to ISO 639-1 code
@@ -1629,64 +1744,122 @@ fn extract_subtitles_to_vtt(input_file: &str, output_dir: &str, whisper_config: 
         }
         used_names.insert(final_name.clone());
 
-        let output_file = format!("{}/{}.vtt", captions_dir, final_name);
+        let is_ass = is_ass_codec(&codec);
+        let ext = if is_ass { "ass" } else { "vtt" };
+        let output_file = format!("{}/{}.{}", captions_dir, final_name, ext);
 
         println!(
-            "Preparing subtitle stream {} (language: '{}', title: '{}', codec: {}) to VTT as '{}' (iso: {:?})",
+            "Preparing subtitle stream {} (language: '{}', title: '{}', codec: {}) as '{}' (format: {}, iso: {:?})",
             stream_idx,
             if language.is_empty() { "unknown" } else { &language },
             if title.is_empty() { "none" } else { &title },
             codec,
             final_name,
+            ext.to_uppercase(),
             iso_code
         );
 
-        outputs.push((stream_idx, final_name, output_file, language, title, iso_code));
+        if is_ass {
+            ass_outputs.push((stream_idx, final_name, output_file, language, title, iso_code));
+        } else {
+            vtt_outputs.push((stream_idx, final_name, output_file, language, title, iso_code));
+        }
     }
 
-    // Build a single ffmpeg invocation that extracts all subtitle streams at once.
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-nostdin")
-        .arg("-analyzeduration").arg("1000M")
-        .arg("-probesize").arg("1000M")
-        .arg("-v").arg("error")
-        .arg("-i").arg(input_file);
+    // Extract ASS/SSA streams natively (copy codec)
+    if !ass_outputs.is_empty() {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-nostdin")
+            .arg("-analyzeduration").arg("1000M")
+            .arg("-probesize").arg("1000M")
+            .arg("-v").arg("error")
+            .arg("-i").arg(input_file);
 
-    for (stream_idx, _final_name, output_file, _language, _title, _iso) in &outputs {
-        cmd.arg("-map").arg(format!("0:{}", stream_idx))
-            .arg("-c:s").arg("webvtt")
-            .arg(output_file);
-    }
+        for (stream_idx, _final_name, output_file, _language, _title, _iso) in &ass_outputs {
+            cmd.arg("-map").arg(format!("0:{}", stream_idx))
+                .arg("-c:s").arg("ass")
+                .arg(output_file);
+        }
 
-    cmd.arg("-y");
+        cmd.arg("-y");
 
-    println!("Extracting {} subtitle stream(s) to VTT...", outputs.len());
-    let result = cmd.output();
+        println!("Extracting {} ASS/SSA subtitle stream(s) natively...", ass_outputs.len());
+        let result = cmd.output();
 
-    match result {
-        Ok(output) => {
-            if output.status.success() {
-                for (_stream_idx, final_name, output_file, _language, _title, iso_code) in outputs {
-                    match fs::metadata(&output_file) {
-                        Ok(metadata) if metadata.len() > 0 => {
-                            saved_files.push(final_name.clone());
-                            available_subs.push((final_name, iso_code));
+        match result {
+            Ok(output) => {
+                if output.status.success() {
+                    for (_stream_idx, final_name, output_file, _language, _title, iso_code) in ass_outputs {
+                        match fs::metadata(&output_file) {
+                            Ok(metadata) if metadata.len() > 0 => {
+                                saved_files.push(format!("{}.ass", final_name));
+                                available_subs.push((final_name, iso_code));
+                            }
+                            _ => { let _ = fs::remove_file(&output_file); }
                         }
-                        _ => { let _ = fs::remove_file(&output_file); }
+                    }
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("Failed to extract ASS subtitles: {}", stderr);
+                    for (_stream_idx, _final_name, output_file, _language, _title, _iso) in ass_outputs {
+                        let _ = fs::remove_file(&output_file);
                     }
                 }
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                println!("Failed to extract subtitles to VTT: {}", stderr);
-                for (_stream_idx, _final_name, output_file, _language, _title, _iso) in outputs {
+            }
+            Err(e) => {
+                println!("Error executing ffmpeg for ASS subtitle extraction: {}", e);
+                for (_stream_idx, _final_name, output_file, _language, _title, _iso) in ass_outputs {
                     let _ = fs::remove_file(&output_file);
                 }
             }
         }
-        Err(e) => {
-            println!("Error executing ffmpeg for subtitle extraction: {}", e);
-            for (_stream_idx, _final_name, output_file, _language, _title, _iso) in outputs {
-                let _ = fs::remove_file(&output_file);
+    }
+
+    // Extract non-ASS streams to WebVTT
+    if !vtt_outputs.is_empty() {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-nostdin")
+            .arg("-analyzeduration").arg("1000M")
+            .arg("-probesize").arg("1000M")
+            .arg("-v").arg("error")
+            .arg("-i").arg(input_file);
+
+        for (stream_idx, _final_name, output_file, _language, _title, _iso) in &vtt_outputs {
+            cmd.arg("-map").arg(format!("0:{}", stream_idx))
+                .arg("-c:s").arg("webvtt")
+                .arg(output_file);
+        }
+
+        cmd.arg("-y");
+
+        println!("Extracting {} subtitle stream(s) to VTT...", vtt_outputs.len());
+        let result = cmd.output();
+
+        match result {
+            Ok(output) => {
+                if output.status.success() {
+                    for (_stream_idx, final_name, output_file, _language, _title, iso_code) in vtt_outputs {
+                        match fs::metadata(&output_file) {
+                            Ok(metadata) if metadata.len() > 0 => {
+                                saved_files.push(format!("{}.vtt", final_name));
+                                available_subs.push((final_name, iso_code));
+                            }
+                            _ => { let _ = fs::remove_file(&output_file); }
+                        }
+                    }
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("Failed to extract subtitles to VTT: {}", stderr);
+                    for (_stream_idx, _final_name, output_file, _language, _title, _iso) in vtt_outputs {
+                        let _ = fs::remove_file(&output_file);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Error executing ffmpeg for subtitle extraction: {}", e);
+                for (_stream_idx, _final_name, output_file, _language, _title, _iso) in vtt_outputs {
+                    let _ = fs::remove_file(&output_file);
+                }
             }
         }
     }
