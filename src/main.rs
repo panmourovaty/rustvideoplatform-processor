@@ -2366,7 +2366,7 @@ fn translate_line_via_llama(
     let lang_name = lang_code_to_name(target_lang);
 
     let prompt = format!(
-        "Translate each numbered segment into {}. Output only the numbered translations.\n\n[1] {}\n",
+        "Translate the following segment into {}, without additional explanation.\n\n{}\n",
         lang_name,
         text.replace('\n', " ")
     );
@@ -2378,7 +2378,7 @@ fn translate_line_via_llama(
         "top_p": 0.95,
         "top_k": 40,
         "repeat_penalty": 1.1,
-        "stop": ["</s>", "<|im_end|>", "<|endoftext|>", "\n[2]"]
+        "stop": ["</s>", "<|im_end|>", "<|endoftext|>"]
     });
 
     let url = format!("{}/completion", llama_url.trim_end_matches('/'));
@@ -2412,25 +2412,11 @@ fn translate_line_via_llama(
         }
     };
 
-    // The model echoes "[1] translation" — extract the text after the marker.
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("[1]") {
-            let translation = strip_translation_preamble(line["[1]".len()..].trim());
-            if !translation.is_empty() {
-                return Some(translation);
-            }
-        }
-    }
-
-    // Fallback: if the model didn't use the numbered format, take the first
-    // non-empty line of the completion as the translation.
-    let fallback = strip_translation_preamble(content.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim());
-    if !fallback.is_empty() {
-        Some(fallback)
-    } else {
-        None
-    }
+    // HY-MT1.5 outputs the translation directly — take the first non-empty line.
+    let translation = strip_translation_preamble(
+        content.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()
+    );
+    if !translation.is_empty() { Some(translation) } else { None }
 }
 
 fn translate_subtitle_file(
