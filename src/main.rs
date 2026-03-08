@@ -2355,8 +2355,9 @@ fn lang_code_to_name(code: &str) -> String {
 
 /// Translate a single subtitle cue text via llama.cpp.
 ///
-/// Sends one line at a time so each request is self-contained and the response
-/// is trivially parsed — the entire completion is the translation.
+/// Uses /v1/chat/completions (OpenAI-compatible endpoint) so that llama.cpp
+/// applies the model's chat template automatically — exactly as the WebUI does.
+/// Sending a raw prompt to /completion bypasses the template and produces garbage.
 fn translate_line_via_llama(
     client: &Client,
     text: &str,
@@ -2365,23 +2366,24 @@ fn translate_line_via_llama(
 ) -> Option<String> {
     let lang_name = lang_code_to_name(target_lang);
 
-    let prompt = format!(
-        "Translate the following segment into {}, without additional explanation.\n\n{}\n",
+    let user_message = format!(
+        "Translate the following subtitle line into {}. Output only the translation, nothing else.\n\n{}",
         lang_name,
         text.replace('\n', " ")
     );
 
     let body = json!({
-        "prompt": prompt,
-        "n_predict": 256,
-        "temperature": 0.0,
+        "messages": [
+            {"role": "user", "content": user_message}
+        ],
+        "max_tokens": 256,
+        "temperature": 0.1,
         "top_p": 0.95,
         "top_k": 40,
-        "repeat_penalty": 1.1,
-        "stop": ["</s>", "<|im_end|>", "<|endoftext|>"]
+        "repeat_penalty": 1.1
     });
 
-    let url = format!("{}/completion", llama_url.trim_end_matches('/'));
+    let url = format!("{}/v1/chat/completions", llama_url.trim_end_matches('/'));
 
     let response = match client.post(&url).json(&body).send() {
         Ok(r) => r,
@@ -2404,18 +2406,22 @@ fn translate_line_via_llama(
         }
     };
 
-    let content = match json.get("content").and_then(|v| v.as_str()) {
+    // OpenAI-compatible response: choices[0].message.content
+    let content = match json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|v| v.as_str())
+    {
         Some(c) => c,
         None => {
-            eprintln!("No 'content' field in llama.cpp response");
+            eprintln!("No content in llama.cpp chat response: {}", json);
             return None;
         }
     };
 
-    // HY-MT1.5 outputs the translation directly — take the first non-empty line.
-    let translation = strip_translation_preamble(
-        content.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()
-    );
+    let translation = strip_translation_preamble(content.trim());
     if !translation.is_empty() { Some(translation) } else { None }
 }
 
