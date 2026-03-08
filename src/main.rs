@@ -2353,47 +2353,32 @@ fn lang_code_to_name(code: &str) -> String {
     }.to_owned()
 }
 
-/// Translate a batch of subtitle cue texts in a single llama.cpp request.
+/// Translate a single subtitle cue text via llama.cpp.
 ///
-/// Each text is sent as a numbered segment `[N] text`.  The model is asked to
-/// output only the numbered translations in the same format, so the results can
-/// be parsed back per-cue without ambiguity.  Batching avoids the KV-cache
-/// contamination that causes repetition when making many small single-cue calls.
-fn translate_batch_via_llama(
+/// Sends one line at a time so each request is self-contained and the response
+/// is trivially parsed — the entire completion is the translation.
+fn translate_line_via_llama(
     client: &Client,
-    texts: &[&str],
+    text: &str,
     target_lang: &str,
     llama_url: &str,
-) -> Vec<Option<String>> {
-    let n = texts.len();
+) -> Option<String> {
     let lang_name = lang_code_to_name(target_lang);
 
-    // Build numbered input: "[1] cue text\n[2] cue text\n..."
-    // Multi-line cues are flattened to a single line to keep the numbering
-    // scheme unambiguous.
-    let numbered_input: String = texts
-        .iter()
-        .enumerate()
-        .map(|(i, text)| format!("[{}] {}", i + 1, text.replace('\n', " ")))
-        .collect::<Vec<_>>()
-        .join("\n");
-
     let prompt = format!(
-        "Translate each numbered segment into {}. Output only the numbered translations.\n\n{}\n",
-        lang_name, numbered_input
+        "Translate each numbered segment into {}. Output only the numbered translations.\n\n[1] {}\n",
+        lang_name,
+        text.replace('\n', " ")
     );
-
-    // Allow ~150 tokens per cue; at minimum 256 tokens.
-    let n_predict = ((n as i64) * 150).max(256);
 
     let body = json!({
         "prompt": prompt,
-        "n_predict": n_predict,
+        "n_predict": 256,
         "temperature": 0.0,
         "top_p": 0.95,
         "top_k": 40,
         "repeat_penalty": 1.1,
-        "stop": ["</s>", "<|im_end|>", "<|endoftext|>"]
+        "stop": ["</s>", "<|im_end|>", "<|endoftext|>", "\n[2]"]
     });
 
     let url = format!("{}/completion", llama_url.trim_end_matches('/'));
@@ -2401,21 +2386,21 @@ fn translate_batch_via_llama(
     let response = match client.post(&url).json(&body).send() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("llama.cpp batch request failed: {}", e);
-            return vec![None; n];
+            eprintln!("llama.cpp request failed: {}", e);
+            return None;
         }
     };
 
     if !response.status().is_success() {
         eprintln!("llama.cpp returned error status: {}", response.status());
-        return vec![None; n];
+        return None;
     }
 
     let json: serde_json::Value = match response.json() {
         Ok(j) => j,
         Err(e) => {
             eprintln!("Failed to parse llama.cpp response: {}", e);
-            return vec![None; n];
+            return None;
         }
     };
 
@@ -2423,31 +2408,29 @@ fn translate_batch_via_llama(
         Some(c) => c,
         None => {
             eprintln!("No 'content' field in llama.cpp response");
-            return vec![None; n];
+            return None;
         }
     };
 
-    // Parse "[N] translation text" lines from the response.
-    let mut results: Vec<Option<String>> = vec![None; n];
+    // The model echoes "[1] translation" — extract the text after the marker.
     for line in content.lines() {
         let line = line.trim();
-        if !line.starts_with('[') {
-            continue;
-        }
-        if let Some(bracket_end) = line.find(']') {
-            let num_str = &line[1..bracket_end];
-            if let Ok(num) = num_str.parse::<usize>() {
-                if num >= 1 && num <= n {
-                    let translation = strip_translation_preamble(line[bracket_end + 1..].trim());
-                    if !translation.is_empty() {
-                        results[num - 1] = Some(translation);
-                    }
-                }
+        if line.starts_with("[1]") {
+            let translation = strip_translation_preamble(line["[1]".len()..].trim());
+            if !translation.is_empty() {
+                return Some(translation);
             }
         }
     }
 
-    results
+    // Fallback: if the model didn't use the numbered format, take the first
+    // non-empty line of the completion as the translation.
+    let fallback = strip_translation_preamble(content.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim());
+    if !fallback.is_empty() {
+        Some(fallback)
+    } else {
+        None
+    }
 }
 
 fn translate_subtitle_file(
@@ -2489,44 +2472,27 @@ fn translate_subtitle_file(
 
     let mut translated_cues = Vec::new();
     let total = cues.len();
-    // Number of cues sent in a single llama.cpp request.  Smaller batches
-    // reduce the chance of a single oversized response, larger batches amortise
-    // per-request overhead.  20 is a good default for subtitle cues.
-    const BATCH_SIZE: usize = 20;
 
-    for (batch_idx, batch) in cues.chunks(BATCH_SIZE).enumerate() {
-        let base = batch_idx * BATCH_SIZE;
-        let batch_end = (base + batch.len()).min(total);
+    for (idx, cue) in cues.iter().enumerate() {
+        let cue_num = idx + 1;
+        println!("Translating cue {}/{} ({} -> {})...", cue_num, total, source_lang, target_lang);
 
-        println!(
-            "Translating cues {}-{}/{} ({} -> {})...",
-            base + 1, batch_end, total, source_lang, target_lang
-        );
-
-        let texts: Vec<&str> = batch.iter().map(|c| c.text.as_str()).collect();
-        let translations = translate_batch_via_llama(
-            &client, &texts, target_lang, &translation_config.llama_url,
-        );
-
-        for (j, (cue, translated)) in batch.iter().zip(translations).enumerate() {
-            let cue_num = base + j + 1;
-            match translated {
-                Some(text) if !text.is_empty() => {
-                    println!("  [{}/{}] OK", cue_num, total);
-                    translated_cues.push(VttCue {
-                        start: cue.start.clone(),
-                        end: cue.end.clone(),
-                        text,
-                    });
-                }
-                _ => {
-                    println!("  [{}/{}] WARNING: translation failed, keeping original.", cue_num, total);
-                    translated_cues.push(VttCue {
-                        start: cue.start.clone(),
-                        end: cue.end.clone(),
-                        text: cue.text.clone(),
-                    });
-                }
+        match translate_line_via_llama(&client, &cue.text, target_lang, &translation_config.llama_url) {
+            Some(text) if !text.is_empty() => {
+                println!("  [{}/{}] OK", cue_num, total);
+                translated_cues.push(VttCue {
+                    start: cue.start.clone(),
+                    end: cue.end.clone(),
+                    text,
+                });
+            }
+            _ => {
+                println!("  [{}/{}] WARNING: translation failed, keeping original.", cue_num, total);
+                translated_cues.push(VttCue {
+                    start: cue.start.clone(),
+                    end: cue.end.clone(),
+                    text: cue.text.clone(),
+                });
             }
         }
     }
