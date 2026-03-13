@@ -1177,6 +1177,18 @@ fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfC
         return Err(format!("ffmpeg JPG thumbnail failed with exit code: {:?}", jpg_status.code()));
     }
 
+    // Generate small AVIF thumbnail (352x198) for bandwidth-efficient small previews
+    let sm_avif_cmd = format!(
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale=352:198:force_original_aspect_ratio=decrease,pad=352:198:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail-sm.avif'",
+        temp_png, pdf_config.thumbnail_crf, output_dir
+    );
+    println!("Executing: {}", sm_avif_cmd);
+    let sm_avif_status = Command::new("sh").arg("-c").arg(&sm_avif_cmd).status()
+        .map_err(|e| format!("Failed to execute ffmpeg for small AVIF: {}", e))?;
+    if !sm_avif_status.success() {
+        eprintln!("Warning: ffmpeg small AVIF thumbnail failed with exit code: {:?}", sm_avif_status.code());
+    }
+
     // Clean up temporary PNG
     let _ = fs::remove_file(&temp_png);
 
@@ -2870,8 +2882,12 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
         "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale=200:200:force_original_aspect_ratio=increase,crop=200:200,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail-small.avif'",
         input_file, picture_config.thumbnail_crf, output_dir
     );
+    let thumbnail_sm_cmd = format!(
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf 'scale=352:198:force_original_aspect_ratio=decrease,pad=352:198:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf {} -frames:v 1 '{}/thumbnail-sm.avif'",
+        input_file, picture_config.thumbnail_crf, output_dir
+    );
 
-    let (r1, r2, r3, r4) = tokio::join!(
+    let (r1, r2, r3, r4, r5) = tokio::join!(
         task::spawn_blocking(move || {
             println!("Executing: {}", transcode_cmd);
             Command::new("sh").arg("-c").arg(&transcode_cmd).status()
@@ -2887,6 +2903,10 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
         task::spawn_blocking(move || {
             println!("Executing: {}", thumbnail_small_cmd);
             Command::new("sh").arg("-c").arg(&thumbnail_small_cmd).status()
+        }),
+        task::spawn_blocking(move || {
+            println!("Executing: {}", thumbnail_sm_cmd);
+            Command::new("sh").arg("-c").arg(&thumbnail_sm_cmd).status()
         })
     );
 
@@ -2916,6 +2936,13 @@ async fn transcode_picture(input_file: &str, output_dir: &str, picture_config: &
         Ok(Ok(s)) if s.success() => {}
         _ => {
             eprintln!("Failed to transcode picture thumbnail-small AVIF");
+            return Err(ffmpeg_next::Error::External);
+        }
+    }
+    match r5 {
+        Ok(Ok(s)) if s.success() => {}
+        _ => {
+            eprintln!("Failed to transcode picture thumbnail-sm AVIF");
             return Err(ffmpeg_next::Error::External);
         }
     }
@@ -3199,8 +3226,12 @@ async fn extract_album_cover(input_file: &str, output_dir: &str, picture_config:
         "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -vf 'scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -update 1 -q:v {} '{}/thumbnail.jpg'",
         input_file, thumb_width, thumb_height, picture_config.thumbnail_width, picture_config.thumbnail_height, picture_config.jpg_quality, output_dir
     );
+    let thumbnail_sm_cmd = format!(
+        "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -map 0:v:0 -c:v libsvtav1 -svtav1-params avif=1 -crf {} -vf 'scale=352:198:force_original_aspect_ratio=decrease,pad=352:198:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p' -b:v 0 -frames:v 1 -f image2 -update 1 '{}/thumbnail-sm.avif'",
+        input_file, picture_config.cover_thumbnail_crf, output_dir
+    );
 
-    let (_, _, _) = tokio::join!(
+    let (_, _, _, _) = tokio::join!(
         task::spawn_blocking(move || {
             println!("Executing: {}", cover_cmd);
             let _ = Command::new("sh").arg("-c").arg(&cover_cmd).status();
@@ -3212,6 +3243,10 @@ async fn extract_album_cover(input_file: &str, output_dir: &str, picture_config:
         task::spawn_blocking(move || {
             println!("Executing: {}", thumbnail_jpg_cmd);
             let _ = Command::new("sh").arg("-c").arg(&thumbnail_jpg_cmd).status();
+        }),
+        task::spawn_blocking(move || {
+            println!("Executing: {}", thumbnail_sm_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&thumbnail_sm_cmd).status();
         })
     );
 
@@ -4083,6 +4118,16 @@ async fn transcode_video(
     post_handles.push(task::spawn_blocking(move || {
         println!("Executing: {}", thumbnail_avif_cmd);
         let _ = Command::new("sh").arg("-c").arg(&thumbnail_avif_cmd).status();
+    }));
+
+    // Small AVIF thumbnail (352x198) for bandwidth-efficient small previews
+    let thumbnail_sm_avif_cmd = format!(
+        "ffmpeg -nostdin -y -ss {:.2} -i '{}' -vf 'scale=352:198:force_original_aspect_ratio=decrease,pad=352:198:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -c:v libsvtav1 -svtav1-params avif=1 -pix_fmt yuv420p10le -update 1 '{}/thumbnail-sm.avif'",
+        random_time, input_file, output_dir
+    );
+    post_handles.push(task::spawn_blocking(move || {
+        println!("Executing: {}", thumbnail_sm_avif_cmd);
+        let _ = Command::new("sh").arg("-c").arg(&thumbnail_sm_avif_cmd).status();
     }));
 
     // Animated showcase.avif
