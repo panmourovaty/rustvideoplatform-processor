@@ -3,8 +3,6 @@ name: Docker Image CI
 on:
   push:
     branches: ["main"]
-  pull_request:
-    branches: ["main"]
 
 jobs:
   build-primary:
@@ -39,11 +37,10 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           outputs: |
-            type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+            type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=true
             type=local,dest=/tmp/build-output
 
       - name: Export digest
-        if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
@@ -51,7 +48,6 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
 
       - name: Upload digest
-        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: digest-${{ env.PLATFORM_PAIR }}
@@ -98,10 +94,9 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
-        if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
@@ -109,7 +104,6 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
 
       - name: Upload digest
-        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: digest-${{ env.PLATFORM_PAIR }}
@@ -119,7 +113,7 @@ jobs:
 
   merge-primary:
     runs-on: ubuntu-latest
-    if: always() && github.event_name != 'pull_request' && needs.build-primary.result == 'success'
+    if: always() && needs.build-primary.result == 'success'
     needs: build-primary
 
     steps:
@@ -145,7 +139,7 @@ jobs:
 
   merge-full:
     runs-on: ubuntu-latest
-    if: always() && github.event_name != 'pull_request' && needs.build-primary.result == 'success' && needs.build-secondary.result == 'success'
+    if: always() && needs.build-primary.result == 'success' && needs.build-secondary.result == 'success'
     needs: [build-primary, build-secondary]
 
     steps:
