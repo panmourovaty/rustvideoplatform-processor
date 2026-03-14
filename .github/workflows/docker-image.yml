@@ -26,6 +26,6 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/arm64,linux/ppc64le,linux/riscv64
           push: ${{ github.event_name != 'pull_request' }}
           tags: panmourovaty/rustvideoplatform-processor:latest
