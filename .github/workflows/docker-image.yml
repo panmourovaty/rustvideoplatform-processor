@@ -25,7 +25,7 @@ jobs:
         run: echo "PLATFORM_PAIR=$(echo ${{ matrix.platform }} | tr '/' '-')" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         run: echo "${{ secrets.DOCKERPW }}" | docker login -u "panmourovaty" --password-stdin
@@ -48,7 +48,7 @@ jobs:
 
       - name: Upload digest
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -73,10 +73,10 @@ jobs:
         run: echo "PLATFORM_PAIR=$(echo ${{ matrix.platform }} | tr '/' '-')" >> $GITHUB_ENV
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         run: echo "${{ secrets.DOCKERPW }}" | docker login -u "panmourovaty" --password-stdin
@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload digest
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -113,14 +113,14 @@ jobs:
 
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digest-linux-{amd64,arm64}
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         run: echo "${{ secrets.DOCKERPW }}" | docker login -u "panmourovaty" --password-stdin
@@ -139,14 +139,14 @@ jobs:
 
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digest-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         run: echo "${{ secrets.DOCKERPW }}" | docker login -u "panmourovaty" --password-stdin
@@ -157,3 +157,36 @@ jobs:
           docker buildx imagetools create \
             --tag panmourovaty/rustvideoplatform-processor:latest \
             $(printf 'panmourovaty/rustvideoplatform-processor@sha256:%s ' *)
+
+  publish-binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libavdevice-dev pkg-config clang
+
+      - name: Set build flags
+        run: |
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            echo "RUSTFLAGS=-C target-cpu=x86-64-v2" >> $GITHUB_ENV
+          fi
+
+      - name: Build binary
+        run: cargo build --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: rustvideoplatform-processor-linux-${{ matrix.arch }}
+          path: target/release/rustvideoplatform-processor
+          if-no-files-found: error
