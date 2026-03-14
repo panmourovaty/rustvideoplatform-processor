@@ -14,8 +14,10 @@ jobs:
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
+            arch: amd64
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
+            arch: arm64
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -36,7 +38,9 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: |
+            type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+            type=local,dest=/tmp/build-output
 
       - name: Export digest
         if: github.event_name != 'pull_request'
@@ -54,6 +58,13 @@ jobs:
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: rustvideoplatform-processor-linux-${{ matrix.arch }}
+          path: /tmp/build-output/opt/rustvideoplatform-processor
+          if-no-files-found: error
 
   build-secondary:
     strategy:
@@ -108,7 +119,7 @@ jobs:
 
   merge-primary:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+    if: always() && github.event_name != 'pull_request' && needs.build-primary.result == 'success'
     needs: build-primary
 
     steps:
@@ -134,7 +145,7 @@ jobs:
 
   merge-full:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+    if: always() && github.event_name != 'pull_request' && needs.build-primary.result == 'success' && needs.build-secondary.result == 'success'
     needs: [build-primary, build-secondary]
 
     steps:
@@ -157,36 +168,3 @@ jobs:
           docker buildx imagetools create \
             --tag panmourovaty/rustvideoplatform-processor:latest \
             $(printf 'panmourovaty/rustvideoplatform-processor@sha256:%s ' *)
-
-  publish-binary:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libavdevice-dev pkg-config clang
-
-      - name: Set build flags
-        run: |
-          if [ "${{ matrix.arch }}" = "amd64" ]; then
-            echo "RUSTFLAGS=-C target-cpu=x86-64-v2" >> $GITHUB_ENV
-          fi
-
-      - name: Build binary
-        run: cargo build --release
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: rustvideoplatform-processor-linux-${{ matrix.arch }}
-          path: target/release/rustvideoplatform-processor
-          if-no-files-found: error
