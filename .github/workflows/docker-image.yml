@@ -26,13 +26,24 @@ jobs:
         run: echo "${{ secrets.DOCKERPW }}" | docker login -u "panmourovaty" --password-stdin
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/${{ matrix.arch }}
           outputs: |
-            type=image,name=panmourovaty/rustvideoplatform-processor:latest-${{ matrix.arch }},push=true
+            type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,push=true
             type=local,dest=/tmp/build-output
+
+      - name: Upload digest
+        run: |
+          mkdir /tmp/digest
+          printf '%s' "${{ steps.build.outputs.digest }}" > /tmp/digest/${{ matrix.arch }}.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digest/${{ matrix.arch }}.txt
 
       - name: Upload binary
         uses: actions/upload-artifact@v7
@@ -53,9 +64,15 @@ jobs:
       - name: Log in to Docker Hub
         run: echo "${{ secrets.DOCKERPW }}" | docker login -u "panmourovaty" --password-stdin
 
+      - name: Download digests
+        uses: actions/download-artifact@v7
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+
       - name: Create and push manifest
         run: |
           docker buildx imagetools create \
             --tag panmourovaty/rustvideoplatform-processor:latest \
-            panmourovaty/rustvideoplatform-processor:latest-amd64 \
-            panmourovaty/rustvideoplatform-processor:latest-arm64
+            "panmourovaty/rustvideoplatform-processor@$(cat /tmp/digests/digest-amd64/amd64.txt)" \
+            "panmourovaty/rustvideoplatform-processor@$(cat /tmp/digests/digest-arm64/arm64.txt)"
