@@ -8,8 +8,9 @@ RUN apk add --no-cache cargo musl-dev openssl-dev pkgconfig ffmpeg-dev clang21-d
 RUN mkdir /src
 COPY ./ /src/rustvideoplatform-processor
 
-ENV RUSTFLAGS="-C target-cpu=x86-64-v2"
-RUN cd /src/rustvideoplatform-processor && cargo build --release
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" = "amd64" ]; then export RUSTFLAGS="-C target-cpu=x86-64-v2"; fi \
+    && cd /src/rustvideoplatform-processor && cargo build --release
 
 FROM alpine:edge
 
