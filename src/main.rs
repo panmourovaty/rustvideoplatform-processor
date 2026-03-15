@@ -464,13 +464,31 @@ struct VideoConfig {
 
 #[tokio::main]
 async fn main() {
-    let config: Config = serde_json::from_str(&fs::read_to_string("config.json").unwrap()).unwrap();
+    eprintln!("Starting rustvideoplatform-processor...");
+
+    let config_str = fs::read_to_string("config.json").unwrap_or_else(|e| {
+        eprintln!("Failed to read config.json: {}", e);
+        eprintln!("Make sure config.json exists in the working directory (see config.json.example)");
+        std::process::exit(1);
+    });
+
+    let config: Config = serde_json::from_str(&config_str).unwrap_or_else(|e| {
+        eprintln!("Failed to parse config.json: {}", e);
+        std::process::exit(1);
+    });
+
+    eprintln!("Config loaded, connecting to database...");
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .connect(&config.dbconnection)
         .await
-        .unwrap();
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to connect to database: {}", e);
+            std::process::exit(1);
+        });
+
+    eprintln!("Database connected, starting processing loop.");
 
     process(pool, config).await;
 }
