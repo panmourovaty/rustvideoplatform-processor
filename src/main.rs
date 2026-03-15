@@ -491,6 +491,10 @@ async fn main() {
     eprintln!("Database connected, starting processing loop.");
 
     process(pool, config).await;
+
+    // The processing loop should never return - if it does, something is wrong
+    eprintln!("ERROR: Processing loop exited unexpectedly!");
+    std::process::exit(1);
 }
 
 fn detect_file_type(input_file: &str) -> Option<String> {

@@ -20,7 +20,9 @@ RUN case "$TARGETARCH" in \
 
 # Build actual project
 COPY ./ /src/rustvideoplatform-processor
-RUN case "$TARGETARCH" in \
+# Touch source files to ensure cargo detects changes over the dummy pre-build
+RUN find /src/rustvideoplatform-processor/src -name '*.rs' -exec touch {} + && \
+    case "$TARGETARCH" in \
         amd64)   export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
         arm64)   FEATURES="--features pdf" ;; \
         ppc64le) export RUSTFLAGS="-C target-cpu=pwr8" ;; \
