@@ -10,7 +10,7 @@ use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
-use surrealdb::engine::remote::ws::{Ws, WsClient};
+use surrealdb::engine::remote::ws::{Client as WsClient, Ws};
 use surrealdb::opt::auth::Root;
 use surrealdb::Surreal;
 type Db = Surreal<WsClient>;
