@@ -3,6 +3,10 @@ name = "rustvideoplatform-processor"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+pdf = ["dep:pdfium-render", "dep:pdf_oxide", "dep:image"]
+
 [dependencies]
 mimalloc = { version = "*", features = ["secure"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
@@ -12,7 +16,7 @@ sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 rand = "0.9"
 ffmpeg-next = "8.0"
 reqwest = { version = "0.13", features = ["blocking", "multipart", "json"] }
-pdfium-render = { version = "0.8", features = ["image", "thread_safe"] }
-pdf_oxide = "0.3"
-image = "0.25"
+pdfium-render = { version = "0.8", features = ["image", "thread_safe"], optional = true }
+pdf_oxide = { version = "0.3", optional = true }
+image = { version = "0.25", optional = true }
 ttf2woff2 = { version = "0.10", default-features = false }
