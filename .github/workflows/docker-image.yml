@@ -2,12 +2,34 @@ name: Docker Image CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["**"]
   pull_request:
     branches: ["main"]
 
 jobs:
+  build-dev:
+    if: github.ref != 'refs/heads/main' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        run: echo "${{ secrets.DOCKERPW }}" | docker login -u "panmourovaty" --password-stdin
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: panmourovaty/rustvideoplatform-processor:dev
+
   build-primary:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -36,10 +58,9 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
-        if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
@@ -47,7 +68,6 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
 
       - name: Upload digest
-        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v6
         with:
           name: digest-${{ env.PLATFORM_PAIR }}
@@ -56,6 +76,7 @@ jobs:
           retention-days: 1
 
   build-secondary:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -87,10 +108,9 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
-        if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
@@ -98,7 +118,6 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
 
       - name: Upload digest
-        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v6
         with:
           name: digest-${{ env.PLATFORM_PAIR }}
@@ -108,7 +127,6 @@ jobs:
 
   merge-primary:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     needs: build-primary
 
     steps:
@@ -134,7 +152,6 @@ jobs:
 
   merge-full:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
     needs: [build-primary, build-secondary]
 
     steps:
