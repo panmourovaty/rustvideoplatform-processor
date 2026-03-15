@@ -36,8 +36,6 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
           outputs: type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
 
       - name: Export digest
@@ -89,8 +87,6 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
           outputs: type=image,name=panmourovaty/rustvideoplatform-processor,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
 
       - name: Export digest
