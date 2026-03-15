@@ -10,8 +10,10 @@ use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use surrealdb::engine::remote::ws::{Client as WsClient, Ws};
+use surrealdb::opt::auth::Root;
+use surrealdb::Surreal;
+type Db = Surreal<WsClient>;
 use std::process::Command;
 use std::time::Duration;
 use reqwest::blocking::{Client, multipart};
@@ -58,7 +60,15 @@ struct FfprobeTags {
 
 #[derive(Deserialize, Clone)]
 struct Config {
-    dbconnection: String,
+    surrealdb_url: String,
+    #[serde(default = "default_surrealdb_ns")]
+    surrealdb_ns: String,
+    #[serde(default = "default_surrealdb_db")]
+    surrealdb_db: String,
+    #[serde(default = "default_surrealdb_user")]
+    surrealdb_user: String,
+    #[serde(default = "default_surrealdb_pass")]
+    surrealdb_pass: String,
     video: VideoConfig,
     #[serde(default = "default_whisper_config")]
     whisper: WhisperConfig,
@@ -198,6 +208,12 @@ struct TranslationConfig {
 fn default_llama_url() -> String { "http://llama:8081".to_string() }
 fn default_translation_source_language() -> String { "en".to_string() }
 fn default_translation_timeout_secs() -> u64 { 120 }
+
+
+fn default_surrealdb_ns() -> String { "main".to_string() }
+fn default_surrealdb_db() -> String { "main".to_string() }
+fn default_surrealdb_user() -> String { "root".to_string() }
+fn default_surrealdb_pass() -> String { "root".to_string() }
 
 fn default_translation_config() -> TranslationConfig {
     TranslationConfig {
@@ -479,18 +495,24 @@ async fn main() {
 
     eprintln!("Config loaded, connecting to database...");
 
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&config.dbconnection)
+    let db: Db = Surreal::new::<Ws>(&config.surrealdb_url).await.unwrap_or_else(|e| {
+        eprintln!("Failed to connect to SurrealDB: {}", e);
+        std::process::exit(1);
+    });
+    db.signin(Root { username: &config.surrealdb_user, password: &config.surrealdb_pass })
         .await
         .unwrap_or_else(|e| {
-            eprintln!("Failed to connect to database: {}", e);
+            eprintln!("Failed to sign in to SurrealDB: {}", e);
             std::process::exit(1);
         });
+    db.use_ns(&config.surrealdb_ns).use_db(&config.surrealdb_db).await.unwrap_or_else(|e| {
+        eprintln!("Failed to select namespace/database: {}", e);
+        std::process::exit(1);
+    });
 
     eprintln!("Database connected, starting processing loop.");
 
-    process(pool, config).await;
+    process(db, config).await;
 
     // The processing loop should never return - if it does, something is wrong
     eprintln!("ERROR: Processing loop exited unexpectedly!");
@@ -766,17 +788,16 @@ fn detect_file_type(input_file: &str) -> Option<String> {
     return None;
 }
 
-async fn process(pool: PgPool, config: Config) {
+async fn process(db: Db, config: Config) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(60000));
 
     loop {
         interval.tick().await;
-        let unprocessed_concepts =
-            match sqlx::query!("SELECT id,type FROM media_concepts WHERE processed = false;")
-                .fetch_all(&pool)
-                .await
-            {
-                Ok(rows) => rows,
+        #[derive(serde::Deserialize)]
+        struct ConceptRow { id: String, #[serde(rename = "type")] r#type: String }
+        let unprocessed_concepts: Vec<ConceptRow> =
+            match db.query("SELECT id, type FROM media_concepts WHERE processed = false").await {
+                Ok(mut resp) => resp.take(0).unwrap_or_default(),
                 Err(e) => {
                     eprintln!("Database query error (will retry): {}", e);
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -793,12 +814,10 @@ async fn process(pool: PgPool, config: Config) {
                     "Upload file not found for concept {}, marking as processed to avoid infinite retry",
                     concept.id
                 );
-                if let Err(e) = sqlx::query!(
-                    "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                    concept.id
-                )
-                .execute(&pool)
-                .await
+                if let Err(e) = db
+                    .query("UPDATE media_concepts SET processed = true WHERE id = $id")
+                    .bind(("id", concept.id.clone()))
+                    .await
                 {
                     eprintln!("Failed to mark missing concept {} as processed: {}", concept.id, e);
                 }
@@ -820,24 +839,24 @@ async fn process(pool: PgPool, config: Config) {
 
             let process_result: Result<(), String> = if actual_type == "video" {
                 println!("processing concept: {} as video", concept.id);
-                process_video(concept.id.clone(), pool.clone(), &config)
+                process_video(concept.id.clone(), db.clone(), &config)
                     .await
                     .map_err(|e| format!("video processing failed: {}", e))
             } else if actual_type == "picture" {
                 println!("processing concept: {} as picture", concept.id);
-                process_picture(concept.id.clone(), pool.clone(), &config.picture)
+                process_picture(concept.id.clone(), db.clone(), &config.picture)
                     .await
                     .map_err(|e| format!("picture processing failed: {}", e))
             } else if actual_type == "audio" {
                 println!("processing concept: {} as audio", concept.id);
-                process_audio(concept.id.clone(), pool.clone(), &config.audio, &config.whisper, &config.picture, &config.translation)
+                process_audio(concept.id.clone(), db.clone(), &config.audio, &config.whisper, &config.picture, &config.translation)
                     .await
                     .map_err(|e| format!("audio processing failed: {}", e))
             } else if actual_type == "document_pdf" {
                 #[cfg(feature = "pdf")]
                 {
                     println!("processing concept: {} as document_pdf", concept.id);
-                    process_document_pdf(concept.id.clone(), pool.clone(), &config.pdf)
+                    process_document_pdf(concept.id.clone(), db.clone(), &config.pdf)
                         .await
                         .map_err(|e| format!("document_pdf processing failed: {}", e))
                 }
@@ -848,7 +867,7 @@ async fn process(pool: PgPool, config: Config) {
                 }
             } else if actual_type == "vtt_translate" {
                 println!("processing concept: {} as vtt_translate", concept.id);
-                process_vtt_translate(concept.id.clone(), pool.clone(), &config.translation)
+                process_vtt_translate(concept.id.clone(), db.clone(), &config.translation)
                     .await
                     .map_err(|e| format!("vtt_translate processing failed: {}", e))
             } else {
@@ -856,12 +875,10 @@ async fn process(pool: PgPool, config: Config) {
                     "Unknown media type '{}' for concept {}, marking as processed",
                     actual_type, concept.id
                 );
-                if let Err(e) = sqlx::query!(
-                    "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                    concept.id
-                )
-                .execute(&pool)
-                .await
+                if let Err(e) = db
+                    .query("UPDATE media_concepts SET processed = true WHERE id = $id")
+                    .bind(("id", concept.id.clone()))
+                    .await
                 {
                     eprintln!("Failed to mark unknown-type concept {} as processed: {}", concept.id, e);
                 }
@@ -875,7 +892,7 @@ async fn process(pool: PgPool, config: Config) {
     }
 }
 
-async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Result<(), String> {
+async fn process_video(concept_id: String, db: Db, config: &Config) -> Result<(), String> {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
@@ -928,13 +945,11 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
                 }).await;
             }
 
-            sqlx::query!(
-                "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                concept_id
-            )
-            .execute(&pool)
-            .await
-            .map_err(|e| format!("Database update error: {}", e))?;
+            db
+                .query("UPDATE media_concepts SET processed = true WHERE id = $id")
+                .bind(("id", concept_id.clone()))
+                .await
+                .map_err(|e| format!("Database update error: {}", e))?;
             let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
             Ok(())
         }
@@ -942,7 +957,7 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
     }
 }
 
-async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_config: &TranslationConfig) -> Result<(), String> {
+async fn process_vtt_translate(concept_id: String, db: Db, translation_config: &TranslationConfig) -> Result<(), String> {
     let meta_path = format!("upload/{}", concept_id);
     let meta_str = fs::read_to_string(&meta_path)
         .map_err(|e| format!("Failed to read vtt_translate metadata: {}", e))?;
@@ -962,11 +977,10 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
 
     if !std::path::Path::new(&source_path).exists() {
         let _ = fs::remove_file(&meta_path);
-        sqlx::query("DELETE FROM media_concepts WHERE id = $1;")
-            .bind(&concept_id)
-            .execute(&pool)
-            .await
-            .map_err(|e| format!("Database delete error: {}", e))?;
+        let _ = db
+            .query("DELETE FROM media_concepts WHERE id = $id")
+            .bind(("id", concept_id.clone()))
+            .await;
         return Err(format!("Source subtitle file not found: {}", source_path));
     }
 
@@ -1020,11 +1034,10 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
 
     // Clean up and mark as processed
     let _ = fs::remove_file(&meta_path);
-    sqlx::query("DELETE FROM media_concepts WHERE id = $1;")
-        .bind(&concept_id)
-        .execute(&pool)
-        .await
-        .map_err(|e| format!("Database delete error: {}", e))?;
+    let _ = db
+        .query("DELETE FROM media_concepts WHERE id = $id")
+        .bind(("id", concept_id.clone()))
+        .await;
 
     if success {
         Ok(())
@@ -1033,7 +1046,7 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
     }
 }
 
-async fn process_picture(concept_id: String, pool: PgPool, picture_config: &PictureConfig) -> Result<(), String> {
+async fn process_picture(concept_id: String, db: Db, picture_config: &PictureConfig) -> Result<(), String> {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
     let transcode_result = transcode_picture(
@@ -1043,13 +1056,11 @@ async fn process_picture(concept_id: String, pool: PgPool, picture_config: &Pict
     ).await;
     match transcode_result {
         Ok(()) => {
-            sqlx::query!(
-                "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                concept_id
-            )
-            .execute(&pool)
-            .await
-            .map_err(|e| format!("Database update error: {}", e))?;
+            db
+                .query("UPDATE media_concepts SET processed = true WHERE id = $id")
+                .bind(("id", concept_id.clone()))
+                .await
+                .map_err(|e| format!("Database update error: {}", e))?;
             let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
             Ok(())
         }
@@ -1057,7 +1068,7 @@ async fn process_picture(concept_id: String, pool: PgPool, picture_config: &Pict
     }
 }
 
-async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTranscodeConfig, whisper_config: &WhisperConfig, picture_config: &PictureConfig, translation_config: &TranslationConfig) -> Result<(), String> {
+async fn process_audio(concept_id: String, db: Db, audio_config: &AudioTranscodeConfig, whisper_config: &WhisperConfig, picture_config: &PictureConfig, translation_config: &TranslationConfig) -> Result<(), String> {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
@@ -1088,13 +1099,11 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
     let transcode_result: Result<(), String> = transcode_result.map_err(|e| format!("{}", e));
     match transcode_result {
         Ok(()) => {
-            sqlx::query!(
-                "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                concept_id
-            )
-            .execute(&pool)
-            .await
-            .map_err(|e| format!("Database update error: {}", e))?;
+            db
+                .query("UPDATE media_concepts SET processed = true WHERE id = $id")
+                .bind(("id", concept_id.clone()))
+                .await
+                .map_err(|e| format!("Database update error: {}", e))?;
             let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
             Ok(())
         }
@@ -1103,7 +1112,7 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
 }
 
 #[cfg(feature = "pdf")]
-async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &PdfConfig) -> Result<(), String> {
+async fn process_document_pdf(concept_id: String, db: Db, pdf_config: &PdfConfig) -> Result<(), String> {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
@@ -1139,13 +1148,11 @@ async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &Pdf
     // Require at least thumbnails to succeed
     thumb_result?;
 
-    sqlx::query!(
-        "UPDATE media_concepts SET processed = true WHERE id = $1;",
-        concept_id
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Database update error: {}", e))?;
+    db
+        .query("UPDATE media_concepts SET processed = true WHERE id = $id")
+        .bind(("id", concept_id.clone()))
+        .await
+        .map_err(|e| format!("Database update error: {}", e))?;
 
     // Move the file into the processing folder and rename it to 'document.pdf'
     let dest_file = format!("{}/document.pdf", output_dir);
