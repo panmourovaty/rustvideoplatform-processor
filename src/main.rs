@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::json;
 use surrealdb::engine::remote::ws::{Client as WsClient, Ws};
 use surrealdb::opt::auth::Root;
+use surrealdb::types::{RecordId, SurrealValue};
 use surrealdb::Surreal;
 type Db = Surreal<WsClient>;
 use std::process::Command;
@@ -23,42 +24,42 @@ use tokio::task;
 #[cfg(feature = "pdf")]
 use pdfium_render::prelude::*;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, SurrealValue, Debug)]
 struct FfprobeOutput {
     streams: Option<Vec<FfprobeStream>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, SurrealValue, Debug)]
 struct FfprobeChaptersOutput {
     chapters: Option<Vec<FfprobeChapter>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, SurrealValue, Debug)]
 struct FfprobeChapter {
     start_time: Option<String>,
     end_time: Option<String>,
     tags: Option<FfprobeChapterTags>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, SurrealValue, Debug)]
 struct FfprobeChapterTags {
     title: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, SurrealValue, Debug)]
 struct FfprobeStream {
     index: Option<u32>,
     codec_name: Option<String>,
     tags: Option<FfprobeTags>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, SurrealValue, Debug)]
 struct FfprobeTags {
     language: Option<String>,
     title: Option<String>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, SurrealValue, Clone)]
 struct Config {
     surrealdb_url: String,
     #[serde(default = "default_surrealdb_ns")]
@@ -83,7 +84,7 @@ struct Config {
     translation: TranslationConfig,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 #[serde(rename_all = "lowercase")]
 enum VideoEncoder {
     Nvenc,
@@ -91,14 +92,14 @@ enum VideoEncoder {
     Vaapi,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct QualityStep {
     label: String,
     scale_divisor: u32,
     audio_bitrate_divisor: u32,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct NvencSettings {
     codec: String,
     preset: String,
@@ -111,7 +112,7 @@ struct NvencSettings {
     temporal_aq: Option<bool>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct QsvSettings {
     codec: String,
     preset: String,
@@ -120,14 +121,14 @@ struct QsvSettings {
     look_ahead_depth: u32,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct VaapiSettings {
     codec: String,
     quality: u32,
     compression_ratio: u32,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct WhisperConfig {
     url: Option<String>,
     #[serde(default = "default_whisper_model")]
@@ -187,7 +188,7 @@ fn default_whisper_config() -> WhisperConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct TranslationConfig {
     /// Target languages as ISO 639-1 codes (e.g., ["en", "cs"]).
     /// If empty, translation is disabled and Whisper uses the output_label name.
@@ -224,7 +225,7 @@ fn default_translation_config() -> TranslationConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct AudioTranscodeConfig {
     #[serde(default = "default_audio_codec")]
     codec: String,
@@ -264,7 +265,7 @@ fn default_audio_transcode_config() -> AudioTranscodeConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct PictureConfig {
     #[serde(default = "default_picture_crf")]
     crf: u32,
@@ -303,7 +304,7 @@ fn default_picture_config() -> PictureConfig {
 }
 
 #[cfg(feature = "pdf")]
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct PdfConfig {
     #[serde(default = "default_pdf_thumbnail_width")]
     thumbnail_width: u32,
@@ -339,7 +340,7 @@ fn default_pdf_config() -> PdfConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct ThumbnailConfig {
     #[serde(default = "default_thumbnail_width")]
     width: u32,
@@ -357,7 +358,7 @@ fn default_thumbnail_config() -> ThumbnailConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct ShowcaseConfig {
     #[serde(default = "default_showcase_width")]
     width: u32,
@@ -387,7 +388,7 @@ fn default_showcase_config() -> ShowcaseConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct PreviewSpriteConfig {
     #[serde(default = "default_preview_interval_seconds")]
     interval_seconds: f64,
@@ -425,7 +426,7 @@ fn default_preview_sprite_config() -> PreviewSpriteConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct DashConfig {
     #[serde(default = "default_dash_audio_codec")]
     audio_codec: String,
@@ -451,7 +452,7 @@ fn default_dash_config() -> DashConfig {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, SurrealValue, Clone, Debug)]
 struct VideoConfig {
     encoder: VideoEncoder,
     max_resolution_steps: u32,
@@ -499,7 +500,7 @@ async fn main() {
         eprintln!("Failed to connect to SurrealDB: {}", e);
         std::process::exit(1);
     });
-    db.signin(Root { username: &config.surrealdb_user, password: &config.surrealdb_pass })
+    db.signin(Root { username: config.surrealdb_user.clone(), password: config.surrealdb_pass.clone() })
         .await
         .unwrap_or_else(|e| {
             eprintln!("Failed to sign in to SurrealDB: {}", e);
@@ -793,7 +794,7 @@ async fn process(db: Db, config: Config) {
 
     loop {
         interval.tick().await;
-        #[derive(serde::Deserialize)]
+        #[derive(serde::Deserialize, SurrealValue)]
         struct ConceptRow { id: String, #[serde(rename = "type")] r#type: String }
         let unprocessed_concepts: Vec<ConceptRow> =
             match db.query("SELECT id, type FROM media_concepts WHERE processed = false").await {
@@ -962,7 +963,7 @@ async fn process_vtt_translate(concept_id: String, db: Db, translation_config: &
     let meta_str = fs::read_to_string(&meta_path)
         .map_err(|e| format!("Failed to read vtt_translate metadata: {}", e))?;
 
-    #[derive(Deserialize)]
+    #[derive(Deserialize, SurrealValue)]
     struct VttTranslateMeta {
         medium_id: String,
         source_label: String,
