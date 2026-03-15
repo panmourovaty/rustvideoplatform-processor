@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM alpine:edge AS builder
 
 RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories \
@@ -5,11 +6,21 @@ RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/reposit
 
 RUN apk add --no-cache cargo musl-dev openssl-dev pkgconfig ffmpeg-dev clang21-dev
 
-RUN mkdir /src
-COPY ./ /src/rustvideoplatform-processor
-
 ARG TARGETARCH
-RUN if [ "$TARGETARCH" = "amd64" ]; then export RUSTFLAGS="-C target-cpu=x86-64-v2"; fi \
+
+# Pre-build dependencies (cached layer - only invalidated when Cargo.toml changes)
+COPY Cargo.toml /src/rustvideoplatform-processor/
+RUN mkdir -p /src/rustvideoplatform-processor/src && echo 'fn main() {}' > /src/rustvideoplatform-processor/src/main.rs
+RUN --mount=type=cache,target=/root/.cargo/registry,id=cargo-reg-${TARGETARCH},sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,id=cargo-git-${TARGETARCH},sharing=locked \
+    if [ "$TARGETARCH" = "amd64" ]; then export RUSTFLAGS="-C target-cpu=x86-64-v2"; fi \
+    && cd /src/rustvideoplatform-processor && cargo build --release 2>/dev/null ; true
+
+# Build actual project
+COPY ./ /src/rustvideoplatform-processor
+RUN --mount=type=cache,target=/root/.cargo/registry,id=cargo-reg-${TARGETARCH},sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,id=cargo-git-${TARGETARCH},sharing=locked \
+    if [ "$TARGETARCH" = "amd64" ]; then export RUSTFLAGS="-C target-cpu=x86-64-v2"; fi \
     && cd /src/rustvideoplatform-processor && cargo build --release
 
 FROM alpine:edge
@@ -19,11 +30,19 @@ RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/reposit
 
 COPY --from=builder /src/rustvideoplatform-processor/target/release/rustvideoplatform-processor /opt/rustvideoplatform-processor
 
-RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium intel-media-driver onevpl-intel-gpu \
-    && wget -q "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-musl-x64.tgz" -O /tmp/pdfium.tgz \
-    && mkdir -p /tmp/pdfium && tar -xzf /tmp/pdfium.tgz -C /tmp/pdfium \
-    && cp /tmp/pdfium/lib/libpdfium.so /usr/lib/ \
-    && rm -rf /tmp/pdfium /tmp/pdfium.tgz
+ARG TARGETARCH
+RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium intel-media-driver onevpl-intel-gpu; \
+    PDFIUM_ARCH=""; \
+    case "$TARGETARCH" in \
+        amd64) PDFIUM_ARCH="x64" ;; \
+        arm64) PDFIUM_ARCH="arm64" ;; \
+    esac; \
+    if [ -n "$PDFIUM_ARCH" ]; then \
+        wget -q "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-musl-${PDFIUM_ARCH}.tgz" -O /tmp/pdfium.tgz \
+        && mkdir -p /tmp/pdfium && tar -xzf /tmp/pdfium.tgz -C /tmp/pdfium \
+        && cp /tmp/pdfium/lib/libpdfium.so /usr/lib/ \
+        && rm -rf /tmp/pdfium /tmp/pdfium.tgz; \
+    fi
 
 EXPOSE 8080
 STOPSIGNAL SIGTERM
