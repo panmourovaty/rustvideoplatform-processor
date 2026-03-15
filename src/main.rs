@@ -495,20 +495,44 @@ async fn main() {
 
     eprintln!("Config loaded, connecting to database...");
 
-    let db: Db = Surreal::new::<Ws>(&config.surrealdb_url).await.unwrap_or_else(|e| {
-        eprintln!("Failed to connect to SurrealDB: {}", e);
-        std::process::exit(1);
-    });
-    db.signin(Root { username: &config.surrealdb_user, password: &config.surrealdb_pass })
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to sign in to SurrealDB: {}", e);
-            std::process::exit(1);
-        });
-    db.use_ns(&config.surrealdb_ns).use_db(&config.surrealdb_db).await.unwrap_or_else(|e| {
-        eprintln!("Failed to select namespace/database: {}", e);
-        std::process::exit(1);
-    });
+    let db: Db = {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let result: Result<Db, String> = async {
+                let d = Surreal::new::<Ws>(&config.surrealdb_url)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                d.signin(Root {
+                    username: &config.surrealdb_user,
+                    password: &config.surrealdb_pass,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                d.use_ns(&config.surrealdb_ns)
+                    .use_db(&config.surrealdb_db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(d)
+            }
+            .await;
+            match result {
+                Ok(d) => break d,
+                Err(e) => {
+                    if attempt >= 10 {
+                        eprintln!("Failed to connect to SurrealDB after {} attempts: {}", attempt, e);
+                        std::process::exit(1);
+                    }
+                    let delay = std::cmp::min(30, 2u64.pow(attempt));
+                    eprintln!(
+                        "SurrealDB connection attempt {}/10 failed: {}. Retrying in {}s...",
+                        attempt, e, delay
+                    );
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                }
+            }
+        }
+    };
 
     eprintln!("Database connected, starting processing loop.");
 
