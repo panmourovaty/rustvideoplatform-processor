@@ -62,13 +62,9 @@ struct FfprobeTags {
 #[derive(Deserialize, SurrealValue, Clone)]
 struct Config {
     surrealdb_url: String,
-    #[serde(default = "default_surrealdb_ns")]
     surrealdb_ns: String,
-    #[serde(default = "default_surrealdb_db")]
     surrealdb_db: String,
-    #[serde(default = "default_surrealdb_user")]
     surrealdb_user: String,
-    #[serde(default = "default_surrealdb_pass")]
     surrealdb_pass: String,
     video: VideoConfig,
     #[serde(default = "default_whisper_config")]
@@ -211,10 +207,6 @@ fn default_translation_source_language() -> String { "en".to_string() }
 fn default_translation_timeout_secs() -> u64 { 120 }
 
 
-fn default_surrealdb_ns() -> String { "main".to_string() }
-fn default_surrealdb_db() -> String { "main".to_string() }
-fn default_surrealdb_user() -> String { "root".to_string() }
-fn default_surrealdb_pass() -> String { "root".to_string() }
 
 fn default_translation_config() -> TranslationConfig {
     TranslationConfig {
