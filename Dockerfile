@@ -12,16 +12,18 @@ ARG TARGETARCH
 COPY Cargo.toml /src/rustvideoplatform-processor/
 RUN mkdir -p /src/rustvideoplatform-processor/src && echo 'fn main() {}' > /src/rustvideoplatform-processor/src/main.rs
 RUN case "$TARGETARCH" in \
-        amd64) export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
-        arm64) FEATURES="--features pdf" ;; \
+        amd64)   export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
+        arm64)   FEATURES="--features pdf" ;; \
+        ppc64le) export RUSTFLAGS="-C target-cpu=pwr8" ;; \
     esac && \
     cd /src/rustvideoplatform-processor && cargo build --release $FEATURES 2>/dev/null ; true
 
 # Build actual project
 COPY ./ /src/rustvideoplatform-processor
 RUN case "$TARGETARCH" in \
-        amd64) export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
-        arm64) FEATURES="--features pdf" ;; \
+        amd64)   export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
+        arm64)   FEATURES="--features pdf" ;; \
+        ppc64le) export RUSTFLAGS="-C target-cpu=pwr8" ;; \
     esac && \
     cd /src/rustvideoplatform-processor && cargo build --release $FEATURES
 
