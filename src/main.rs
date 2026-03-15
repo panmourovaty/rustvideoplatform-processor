@@ -18,6 +18,7 @@ use reqwest::blocking::{Client, multipart};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task;
+#[cfg(feature = "pdf")]
 use pdfium_render::prelude::*;
 
 #[derive(Deserialize, Debug)]
@@ -65,6 +66,7 @@ struct Config {
     audio: AudioTranscodeConfig,
     #[serde(default = "default_picture_config")]
     picture: PictureConfig,
+    #[cfg(feature = "pdf")]
     #[serde(default = "default_pdf_config")]
     pdf: PdfConfig,
     #[serde(default = "default_translation_config")]
@@ -284,6 +286,7 @@ fn default_picture_config() -> PictureConfig {
     }
 }
 
+#[cfg(feature = "pdf")]
 #[derive(Deserialize, Clone, Debug)]
 struct PdfConfig {
     #[serde(default = "default_pdf_thumbnail_width")]
@@ -298,12 +301,18 @@ struct PdfConfig {
     render_width: u32,
 }
 
+#[cfg(feature = "pdf")]
 fn default_pdf_thumbnail_width() -> u32 { 1280 }
+#[cfg(feature = "pdf")]
 fn default_pdf_thumbnail_height() -> u32 { 720 }
+#[cfg(feature = "pdf")]
 fn default_pdf_thumbnail_crf() -> u32 { 28 }
+#[cfg(feature = "pdf")]
 fn default_pdf_jpg_quality() -> u32 { 25 }
+#[cfg(feature = "pdf")]
 fn default_pdf_render_width() -> u32 { 2000 }
 
+#[cfg(feature = "pdf")]
 fn default_pdf_config() -> PdfConfig {
     PdfConfig {
         thumbnail_width: default_pdf_thumbnail_width(),
@@ -468,6 +477,7 @@ async fn main() {
 
 fn detect_file_type(input_file: &str) -> Option<String> {
     // Check for PDF magic bytes (%PDF)
+    #[cfg(feature = "pdf")]
     if let Ok(mut file) = std::fs::File::open(input_file) {
         let mut magic = [0u8; 4];
         if std::io::Read::read_exact(&mut file, &mut magic).is_ok() && &magic == b"%PDF" {
@@ -802,10 +812,18 @@ async fn process(pool: PgPool, config: Config) {
                     .await
                     .map_err(|e| format!("audio processing failed: {}", e))
             } else if actual_type == "document_pdf" {
-                println!("processing concept: {} as document_pdf", concept.id);
-                process_document_pdf(concept.id.clone(), pool.clone(), &config.pdf)
-                    .await
-                    .map_err(|e| format!("document_pdf processing failed: {}", e))
+                #[cfg(feature = "pdf")]
+                {
+                    println!("processing concept: {} as document_pdf", concept.id);
+                    process_document_pdf(concept.id.clone(), pool.clone(), &config.pdf)
+                        .await
+                        .map_err(|e| format!("document_pdf processing failed: {}", e))
+                }
+                #[cfg(not(feature = "pdf"))]
+                {
+                    eprintln!("PDF processing not available (built without pdf feature) for concept {}, skipping", concept.id);
+                    Ok(())
+                }
             } else if actual_type == "vtt_translate" {
                 println!("processing concept: {} as vtt_translate", concept.id);
                 process_vtt_translate(concept.id.clone(), pool.clone(), &config.translation)
@@ -1062,6 +1080,7 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
     }
 }
 
+#[cfg(feature = "pdf")]
 async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &PdfConfig) -> Result<(), String> {
     fs::create_dir_all(format!("upload/{}_processing", &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
@@ -1114,6 +1133,7 @@ async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &Pdf
     Ok(())
 }
 
+#[cfg(feature = "pdf")]
 fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfConfig) -> Result<(), String> {
     // Use pdfium-render to render the first page to a temporary PNG
     let pdfium = Pdfium::default();
@@ -1196,6 +1216,7 @@ fn generate_pdf_thumbnails(input_file: &str, output_dir: &str, pdf_config: &PdfC
     Ok(())
 }
 
+#[cfg(feature = "pdf")]
 fn extract_pdf_text(input_file: &str, output_dir: &str) -> Result<(), String> {
     let mut doc = pdf_oxide::PdfDocument::open(input_file)
         .map_err(|e| format!("Failed to open PDF with pdf_oxide: {}", e))?;

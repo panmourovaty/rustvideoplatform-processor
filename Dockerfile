@@ -13,15 +13,19 @@ COPY Cargo.toml /src/rustvideoplatform-processor/
 RUN mkdir -p /src/rustvideoplatform-processor/src && echo 'fn main() {}' > /src/rustvideoplatform-processor/src/main.rs
 RUN --mount=type=cache,target=/root/.cargo/registry,id=cargo-reg-${TARGETARCH},sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,id=cargo-git-${TARGETARCH},sharing=locked \
+    FEATURES=""; \
+    if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then FEATURES="--features pdf"; fi; \
     if [ "$TARGETARCH" = "amd64" ]; then export RUSTFLAGS="-C target-cpu=x86-64-v2"; fi \
-    && cd /src/rustvideoplatform-processor && cargo build --release 2>/dev/null ; true
+    && cd /src/rustvideoplatform-processor && cargo build --release $FEATURES 2>/dev/null ; true
 
 # Build actual project
 COPY ./ /src/rustvideoplatform-processor
 RUN --mount=type=cache,target=/root/.cargo/registry,id=cargo-reg-${TARGETARCH},sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,id=cargo-git-${TARGETARCH},sharing=locked \
+    FEATURES=""; \
+    if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then FEATURES="--features pdf"; fi; \
     if [ "$TARGETARCH" = "amd64" ]; then export RUSTFLAGS="-C target-cpu=x86-64-v2"; fi \
-    && cd /src/rustvideoplatform-processor && cargo build --release
+    && cd /src/rustvideoplatform-processor && cargo build --release $FEATURES
 
 FROM alpine:edge
 
