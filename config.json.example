@@ -1,5 +1,9 @@
 {
-    "dbconnection": "postgresql://user:password@localhost:5432/database",
+    "surrealdb_url": "ws://surrealdb:8000",
+    "surrealdb_ns": "main",
+    "surrealdb_db": "main",
+    "surrealdb_user": "root",
+    "surrealdb_pass": "SECRET_PASSWORD_HERE",
 
     "whisper": {
         "url": "http://whisper:8080/inference",
