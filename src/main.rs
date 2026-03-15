@@ -816,7 +816,7 @@ async fn process(db: Db, config: Config) {
                 );
                 if let Err(e) = db
                     .query("UPDATE media_concepts SET processed = true WHERE id = $id")
-                    .bind(("id", &concept.id))
+                    .bind(("id", concept.id.clone()))
                     .await
                 {
                     eprintln!("Failed to mark missing concept {} as processed: {}", concept.id, e);
@@ -877,7 +877,7 @@ async fn process(db: Db, config: Config) {
                 );
                 if let Err(e) = db
                     .query("UPDATE media_concepts SET processed = true WHERE id = $id")
-                    .bind(("id", &concept.id))
+                    .bind(("id", concept.id.clone()))
                     .await
                 {
                     eprintln!("Failed to mark unknown-type concept {} as processed: {}", concept.id, e);
@@ -947,7 +947,7 @@ async fn process_video(concept_id: String, db: Db, config: &Config) -> Result<()
 
             db
                 .query("UPDATE media_concepts SET processed = true WHERE id = $id")
-                .bind(("id", &concept_id))
+                .bind(("id", concept_id.clone()))
                 .await
                 .map_err(|e| format!("Database update error: {}", e))?;
             let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
@@ -979,7 +979,7 @@ async fn process_vtt_translate(concept_id: String, db: Db, translation_config: &
         let _ = fs::remove_file(&meta_path);
         let _ = db
             .query("DELETE FROM media_concepts WHERE id = $id")
-            .bind(("id", &concept_id))
+            .bind(("id", concept_id.clone()))
             .await;
         return Err(format!("Source subtitle file not found: {}", source_path));
     }
@@ -1036,7 +1036,7 @@ async fn process_vtt_translate(concept_id: String, db: Db, translation_config: &
     let _ = fs::remove_file(&meta_path);
     let _ = db
         .query("DELETE FROM media_concepts WHERE id = $id")
-        .bind(("id", &concept_id))
+        .bind(("id", concept_id.clone()))
         .await;
 
     if success {
@@ -1058,7 +1058,7 @@ async fn process_picture(concept_id: String, db: Db, picture_config: &PictureCon
         Ok(()) => {
             db
                 .query("UPDATE media_concepts SET processed = true WHERE id = $id")
-                .bind(("id", &concept_id))
+                .bind(("id", concept_id.clone()))
                 .await
                 .map_err(|e| format!("Database update error: {}", e))?;
             let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
@@ -1101,7 +1101,7 @@ async fn process_audio(concept_id: String, db: Db, audio_config: &AudioTranscode
         Ok(()) => {
             db
                 .query("UPDATE media_concepts SET processed = true WHERE id = $id")
-                .bind(("id", &concept_id))
+                .bind(("id", concept_id.clone()))
                 .await
                 .map_err(|e| format!("Database update error: {}", e))?;
             let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
@@ -1150,7 +1150,7 @@ async fn process_document_pdf(concept_id: String, db: Db, pdf_config: &PdfConfig
 
     db
         .query("UPDATE media_concepts SET processed = true WHERE id = $id")
-        .bind(("id", &concept_id))
+        .bind(("id", concept_id.clone()))
         .await
         .map_err(|e| format!("Database update error: {}", e))?;
 
