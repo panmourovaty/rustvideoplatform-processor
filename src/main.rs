@@ -466,14 +466,14 @@ struct VideoConfig {
 async fn main() {
     eprintln!("Starting rustvideoplatform-processor...");
 
-    let config_str = fs::read_to_string("config.json").unwrap_or_else(|e| {
-        eprintln!("Failed to read config.json: {}", e);
-        eprintln!("Make sure config.json exists in the working directory (see config.json.example)");
+    let config_str = fs::read_to_string("/config.json").unwrap_or_else(|e| {
+        eprintln!("Failed to read /config.json: {}", e);
+        eprintln!("Make sure /config.json exists in the working directory (see config.json.example)");
         std::process::exit(1);
     });
 
     let config: Config = serde_json::from_str(&config_str).unwrap_or_else(|e| {
-        eprintln!("Failed to parse config.json: {}", e);
+        eprintln!("Failed to parse /config.json: {}", e);
         std::process::exit(1);
     });
 
