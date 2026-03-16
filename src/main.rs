@@ -951,8 +951,17 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
 
 async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_config: &TranslationConfig, upload_path: &str, source_path: &str) -> Result<(), String> {
     let meta_path = format!("{}/{}", upload_path, concept_id);
-    let meta_str = fs::read_to_string(&meta_path)
-        .map_err(|e| format!("Failed to read vtt_translate metadata: {}", e))?;
+    let meta_str = match fs::read_to_string(&meta_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = fs::remove_file(&meta_path);
+            let _ = sqlx::query("DELETE FROM media_concepts WHERE id = $1;")
+                .bind(&concept_id)
+                .execute(&pool)
+                .await;
+            return Err(format!("Failed to read vtt_translate metadata: {}", e));
+        }
+    };
 
     #[derive(Deserialize)]
     struct VttTranslateMeta {
@@ -961,8 +970,17 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
         target_language: String,
     }
 
-    let meta: VttTranslateMeta = serde_json::from_str(&meta_str)
-        .map_err(|e| format!("Failed to parse vtt_translate metadata: {}", e))?;
+    let meta: VttTranslateMeta = match serde_json::from_str(&meta_str) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = fs::remove_file(&meta_path);
+            let _ = sqlx::query("DELETE FROM media_concepts WHERE id = $1;")
+                .bind(&concept_id)
+                .execute(&pool)
+                .await;
+            return Err(format!("Failed to parse vtt_translate metadata: {}", e));
+        }
+    };
 
     let captions_dir = format!("{}/{}/captions", source_path, meta.medium_id);
     let source_vtt_path = format!("{}/{}.vtt", captions_dir, meta.source_label);
