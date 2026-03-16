@@ -71,6 +71,10 @@ struct Config {
     pdf: PdfConfig,
     #[serde(default = "default_translation_config")]
     translation: TranslationConfig,
+    #[serde(default = "default_upload_path")]
+    upload_path: String,
+    #[serde(default = "default_source_path")]
+    source_path: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -161,6 +165,9 @@ fn default_whisper_silence_noise_db() -> f64 { -30.0 }
 fn default_whisper_silence_min_duration() -> f64 { 0.5 }
 fn default_whisper_silence_detect_parallel() -> u32 { 4 }
 fn default_whisper_temperature() -> f32 { 0.0 }
+
+fn default_upload_path() -> String { "/upload".to_string() }
+fn default_source_path() -> String { "/source".to_string() }
 
 fn default_whisper_config() -> WhisperConfig {
     WhisperConfig {
@@ -785,7 +792,7 @@ async fn process(pool: PgPool, config: Config) {
             };
 
         for concept in unprocessed_concepts {
-            let input_file = format!("upload/{}", concept.id);
+            let input_file = format!("{}/{}", config.upload_path, concept.id);
 
             // Check that the upload file actually exists before attempting processing
             if !std::path::Path::new(&input_file).exists() {
@@ -825,19 +832,19 @@ async fn process(pool: PgPool, config: Config) {
                     .map_err(|e| format!("video processing failed: {}", e))
             } else if actual_type == "picture" {
                 println!("processing concept: {} as picture", concept.id);
-                process_picture(concept.id.clone(), pool.clone(), &config.picture)
+                process_picture(concept.id.clone(), pool.clone(), &config.picture, &config.upload_path)
                     .await
                     .map_err(|e| format!("picture processing failed: {}", e))
             } else if actual_type == "audio" {
                 println!("processing concept: {} as audio", concept.id);
-                process_audio(concept.id.clone(), pool.clone(), &config.audio, &config.whisper, &config.picture, &config.translation)
+                process_audio(concept.id.clone(), pool.clone(), &config.audio, &config.whisper, &config.picture, &config.translation, &config.upload_path)
                     .await
                     .map_err(|e| format!("audio processing failed: {}", e))
             } else if actual_type == "document_pdf" {
                 #[cfg(feature = "pdf")]
                 {
                     println!("processing concept: {} as document_pdf", concept.id);
-                    process_document_pdf(concept.id.clone(), pool.clone(), &config.pdf)
+                    process_document_pdf(concept.id.clone(), pool.clone(), &config.pdf, &config.upload_path)
                         .await
                         .map_err(|e| format!("document_pdf processing failed: {}", e))
                 }
@@ -848,7 +855,7 @@ async fn process(pool: PgPool, config: Config) {
                 }
             } else if actual_type == "vtt_translate" {
                 println!("processing concept: {} as vtt_translate", concept.id);
-                process_vtt_translate(concept.id.clone(), pool.clone(), &config.translation)
+                process_vtt_translate(concept.id.clone(), pool.clone(), &config.translation, &config.upload_path, &config.source_path)
                     .await
                     .map_err(|e| format!("vtt_translate processing failed: {}", e))
             } else {
@@ -876,13 +883,13 @@ async fn process(pool: PgPool, config: Config) {
 }
 
 async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Result<(), String> {
-    fs::create_dir_all(format!("upload/{}_processing", &concept_id))
+    fs::create_dir_all(format!("{}/{}_processing", config.upload_path, &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
     // Extract subtitles, chapters, and transcode video all in parallel
-    let input_file = format!("upload/{}", concept_id);
-    let input_dir = format!("upload/{}", concept_id);
-    let output_dir = format!("upload/{}_processing", concept_id);
+    let input_file = format!("{}/{}", config.upload_path, concept_id);
+    let input_dir = format!("{}/{}", config.upload_path, concept_id);
+    let output_dir = format!("{}/{}_processing", config.upload_path, concept_id);
     let input_file_sub = input_file.clone();
     let output_dir_sub = output_dir.clone();
     let whisper_config = config.whisper.clone();
@@ -906,7 +913,7 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
     match transcode_result {
         Ok(()) => {
             // Check for custom thumbnail and apply it if present
-            let custom_thumbnail_path = format!("upload/{}_custom_thumbnail", concept_id);
+            let custom_thumbnail_path = format!("{}/{}_custom_thumbnail", config.upload_path, concept_id);
             if std::path::Path::new(&custom_thumbnail_path).exists() {
                 let output_dir_ct = output_dir.clone();
                 let w = config.video.thumbnail.width;
@@ -935,15 +942,15 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
             .execute(&pool)
             .await
             .map_err(|e| format!("Database update error: {}", e))?;
-            let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+            let _ = fs::remove_file(format!("{}/{}", config.upload_path, concept_id).as_str());
             Ok(())
         }
         Err(e) => Err(format!("Video transcode failed: {}", e)),
     }
 }
 
-async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_config: &TranslationConfig) -> Result<(), String> {
-    let meta_path = format!("upload/{}", concept_id);
+async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_config: &TranslationConfig, upload_path: &str, source_path: &str) -> Result<(), String> {
+    let meta_path = format!("{}/{}", upload_path, concept_id);
     let meta_str = fs::read_to_string(&meta_path)
         .map_err(|e| format!("Failed to read vtt_translate metadata: {}", e))?;
 
@@ -957,17 +964,17 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
     let meta: VttTranslateMeta = serde_json::from_str(&meta_str)
         .map_err(|e| format!("Failed to parse vtt_translate metadata: {}", e))?;
 
-    let captions_dir = format!("source/{}/captions", meta.medium_id);
-    let source_path = format!("{}/{}.vtt", captions_dir, meta.source_label);
+    let captions_dir = format!("{}/{}/captions", source_path, meta.medium_id);
+    let source_vtt_path = format!("{}/{}.vtt", captions_dir, meta.source_label);
 
-    if !std::path::Path::new(&source_path).exists() {
+    if !std::path::Path::new(&source_vtt_path).exists() {
         let _ = fs::remove_file(&meta_path);
         sqlx::query("DELETE FROM media_concepts WHERE id = $1;")
             .bind(&concept_id)
             .execute(&pool)
             .await
             .map_err(|e| format!("Database delete error: {}", e))?;
-        return Err(format!("Source subtitle file not found: {}", source_path));
+        return Err(format!("Source subtitle file not found: {}", source_vtt_path));
     }
 
     let output_label = format!("AI_{}", meta.target_language);
@@ -979,7 +986,7 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
 
     let success = task::spawn_blocking(move || {
         translate_subtitle_file(
-            &source_path,
+            &source_vtt_path,
             &source_lang,
             &target_lang,
             &output_path,
@@ -1033,12 +1040,12 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
     }
 }
 
-async fn process_picture(concept_id: String, pool: PgPool, picture_config: &PictureConfig) -> Result<(), String> {
-    fs::create_dir_all(format!("upload/{}_processing", &concept_id))
+async fn process_picture(concept_id: String, pool: PgPool, picture_config: &PictureConfig, upload_path: &str) -> Result<(), String> {
+    fs::create_dir_all(format!("{}/{}_processing", upload_path, &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
     let transcode_result = transcode_picture(
-        format!("upload/{}", concept_id).as_str(),
-        format!("upload/{}_processing", concept_id).as_str(),
+        format!("{}/{}", upload_path, concept_id).as_str(),
+        format!("{}/{}_processing", upload_path, concept_id).as_str(),
         picture_config,
     ).await;
     match transcode_result {
@@ -1050,21 +1057,21 @@ async fn process_picture(concept_id: String, pool: PgPool, picture_config: &Pict
             .execute(&pool)
             .await
             .map_err(|e| format!("Database update error: {}", e))?;
-            let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+            let _ = fs::remove_file(format!("{}/{}", upload_path, concept_id).as_str());
             Ok(())
         }
         Err(e) => Err(format!("Picture transcode failed: {}", e)),
     }
 }
 
-async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTranscodeConfig, whisper_config: &WhisperConfig, picture_config: &PictureConfig, translation_config: &TranslationConfig) -> Result<(), String> {
-    fs::create_dir_all(format!("upload/{}_processing", &concept_id))
+async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTranscodeConfig, whisper_config: &WhisperConfig, picture_config: &PictureConfig, translation_config: &TranslationConfig, upload_path: &str) -> Result<(), String> {
+    fs::create_dir_all(format!("{}/{}_processing", upload_path, &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
     // Extract subtitles, chapters, and transcode audio all in parallel
-    let input_file = format!("upload/{}", concept_id);
-    let input_dir = format!("upload/{}", concept_id);
-    let output_dir = format!("upload/{}_processing", concept_id);
+    let input_file = format!("{}/{}", upload_path, concept_id);
+    let input_dir = format!("{}/{}", upload_path, concept_id);
+    let output_dir = format!("{}/{}_processing", upload_path, concept_id);
     let input_file_sub = input_file.clone();
     let output_dir_sub = output_dir.clone();
     let whisper_config = whisper_config.clone();
@@ -1095,7 +1102,7 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
             .execute(&pool)
             .await
             .map_err(|e| format!("Database update error: {}", e))?;
-            let _ = fs::remove_file(format!("upload/{}", concept_id).as_str());
+            let _ = fs::remove_file(format!("{}/{}", upload_path, concept_id).as_str());
             Ok(())
         }
         Err(e) => Err(format!("Audio transcode failed: {}", e)),
@@ -1103,12 +1110,12 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
 }
 
 #[cfg(feature = "pdf")]
-async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &PdfConfig) -> Result<(), String> {
-    fs::create_dir_all(format!("upload/{}_processing", &concept_id))
+async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &PdfConfig, upload_path: &str) -> Result<(), String> {
+    fs::create_dir_all(format!("{}/{}_processing", upload_path, &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
-    let input_file = format!("upload/{}", concept_id);
-    let output_dir = format!("upload/{}_processing", concept_id);
+    let input_file = format!("{}/{}", upload_path, concept_id);
+    let output_dir = format!("{}/{}_processing", upload_path, concept_id);
 
     // Generate thumbnails and extract text in parallel
     let input_file_thumb = input_file.clone();
