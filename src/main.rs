@@ -83,6 +83,7 @@ enum VideoEncoder {
     Nvenc,
     Qsv,
     Vaapi,
+    V4l2m2m,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -120,6 +121,19 @@ struct VaapiSettings {
     quality: u32,
     compression_ratio: u32,
 }
+
+#[derive(Deserialize, Clone, Debug)]
+struct V4l2m2mSettings {
+    /// FFmpeg codec name, e.g. "hevc_v4l2m2m" or "h264_v4l2m2m"
+    codec: String,
+    /// Constant QP value (0-51, lower = better quality). Mirrors QSV global_quality.
+    qp: u32,
+    /// Number of V4L2 capture buffers. More buffers improve throughput on ARM.
+    #[serde(default = "default_v4l2m2m_num_capture_buffers")]
+    num_capture_buffers: u32,
+}
+
+fn default_v4l2m2m_num_capture_buffers() -> u32 { 64 }
 
 #[derive(Deserialize, Clone, Debug)]
 struct WhisperConfig {
@@ -459,6 +473,8 @@ struct VideoConfig {
     qsv: Option<QsvSettings>,
     #[serde(default)]
     vaapi: Option<VaapiSettings>,
+    #[serde(default)]
+    v4l2m2m: Option<V4l2m2mSettings>,
     #[serde(default = "default_dash_config")]
     dash: DashConfig,
     #[serde(default = "default_thumbnail_config")]
@@ -3405,6 +3421,7 @@ enum EncoderType {
     Nvenc,
     Qsv,
     Vaapi,
+    V4l2m2m,
 }
 
 #[derive(Debug, Clone)]
@@ -3572,6 +3589,25 @@ fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInf
                     params,
                     tonemap_filter,
                     EncoderType::Vaapi,
+                )
+            }
+            VideoEncoder::V4l2m2m => {
+                let settings = config.v4l2m2m.as_ref().expect("V4L2M2M settings required");
+
+                // V4L2M2M uses the kernel V4L2 API directly — no hwaccel flags needed.
+                // All scaling is done in software; most ARM v4l2m2m drivers only support yuv420p.
+                let hwaccel = String::new();
+
+                let params = format!(
+                    "-c:v {} -qp {} -num_capture_buffers {}",
+                    settings.codec, settings.qp, settings.num_capture_buffers
+                );
+
+                (
+                    hwaccel,
+                    params,
+                    tonemap_filter,
+                    EncoderType::V4l2m2m,
                 )
             }
         }
@@ -3931,6 +3967,20 @@ async fn transcode_video(
                         hwaccel_args, input_file, w, h, codec_params, output_file
                     )
                 }
+            }
+            EncoderType::V4l2m2m => {
+                // V4L2M2M: pure software path — scale + optional HDR tonemapping in CPU,
+                // then hand off frames to the kernel encoder via V4L2.
+                // Most ARM v4l2m2m drivers only accept yuv420p (8-bit).
+                let filter_chain = if hdr_info.is_hdr && !tonemap_filter.is_empty() {
+                    format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p", tonemap_filter, w, h)
+                } else {
+                    format!("scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p", w, h)
+                };
+                format!(
+                    "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf '{}' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
+                    input_file, filter_chain, codec_params, output_file
+                )
             }
         };
 

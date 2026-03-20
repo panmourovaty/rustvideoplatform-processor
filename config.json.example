@@ -92,6 +92,11 @@
             "quality": 51,
             "compression_ratio": 5
         },
+        "v4l2m2m": {
+            "codec": "hevc_v4l2m2m",
+            "qp": 28,
+            "num_capture_buffers": 64
+        },
 
         "dash": {
             "audio_codec": "libopus",
