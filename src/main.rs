@@ -83,6 +83,7 @@ enum VideoEncoder {
     Nvenc,
     Qsv,
     Vaapi,
+    V4l2m2m,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -103,6 +104,8 @@ struct NvencSettings {
     lookahead: Option<u32>,
     #[serde(default)]
     temporal_aq: Option<bool>,
+    #[serde(default)]
+    max_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -112,6 +115,8 @@ struct QsvSettings {
     global_quality: u32,
     #[serde(default)]
     look_ahead_depth: u32,
+    #[serde(default)]
+    max_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -119,7 +124,27 @@ struct VaapiSettings {
     codec: String,
     quality: u32,
     compression_ratio: u32,
+    #[serde(default)]
+    max_bitrate_kbps: Option<u32>,
 }
+
+#[derive(Deserialize, Clone, Debug)]
+struct V4l2m2mSettings {
+    /// FFmpeg codec name, e.g. "hevc_v4l2m2m" or "h264_v4l2m2m"
+    codec: String,
+    /// Constant QP value (0-51, lower = better quality). Mirrors QSV global_quality.
+    qp: u32,
+    /// Number of V4L2 capture buffers. More buffers improve throughput on ARM.
+    #[serde(default = "default_v4l2m2m_num_capture_buffers")]
+    num_capture_buffers: u32,
+    /// Optional peak bitrate cap in Kbps (e.g. 50000 = 50 Mbit/s).
+    /// Sets -maxrate and -bufsize (2x maxrate) to prevent bitrate spikes.
+    /// Leave unset for unconstrained QP-only encoding.
+    #[serde(default)]
+    max_bitrate_kbps: Option<u32>,
+}
+
+fn default_v4l2m2m_num_capture_buffers() -> u32 { 64 }
 
 #[derive(Deserialize, Clone, Debug)]
 struct WhisperConfig {
@@ -459,6 +484,8 @@ struct VideoConfig {
     qsv: Option<QsvSettings>,
     #[serde(default)]
     vaapi: Option<VaapiSettings>,
+    #[serde(default)]
+    v4l2m2m: Option<V4l2m2mSettings>,
     #[serde(default = "default_dash_config")]
     dash: DashConfig,
     #[serde(default = "default_thumbnail_config")]
@@ -3405,6 +3432,7 @@ enum EncoderType {
     Nvenc,
     Qsv,
     Vaapi,
+    V4l2m2m,
 }
 
 #[derive(Debug, Clone)]
@@ -3508,6 +3536,9 @@ fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInf
                 if settings.temporal_aq.unwrap_or(false) {
                     params.push_str(" -temporal-aq 1");
                 }
+                if let Some(max_kbps) = settings.max_bitrate_kbps {
+                    params.push_str(&format!(" -maxrate {}k -bufsize {}k", max_kbps, max_kbps * 2));
+                }
 
                 (
                     hwaccel,
@@ -3541,6 +3572,9 @@ fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInf
                     // global_quality is the QSV quality knob used by la_icq/ICQ-style modes
                     params.push_str(&format!(" -global_quality:v {}", settings.global_quality));
                 }
+                if let Some(max_kbps) = settings.max_bitrate_kbps {
+                    params.push_str(&format!(" -maxrate {}k -bufsize {}k", max_kbps, max_kbps * 2));
+                }
 
                 (
                     hwaccel,
@@ -3560,18 +3594,50 @@ fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInf
                 };
 
                 let quality = settings.quality;
-                let mut params = format!(
-                    "-c:v {} -global_quality {} -qp {}",
-                    settings.codec, quality, quality
-                );
-
-                params.push_str(" -compression_level 7");
+                // When max_bitrate_kbps is set we must switch to VBR mode: combining -qp
+                // (CQP) with -maxrate (VBR) produces conflicting mode signals that VAAPI
+                // drivers silently ignore, making the cap ineffective.  In VBR mode we
+                // drop -qp and drive the encoder with a bitrate ceiling instead.
+                let params = if let Some(max_kbps) = settings.max_bitrate_kbps {
+                    format!(
+                        "-c:v {} -b:v {}k -maxrate {}k -bufsize {}k -compression_level 7",
+                        settings.codec, max_kbps, max_kbps, max_kbps * 2
+                    )
+                } else {
+                    format!(
+                        "-c:v {} -global_quality {} -qp {} -compression_level 7",
+                        settings.codec, quality, quality
+                    )
+                };
 
                 (
                     hwaccel,
                     params,
                     tonemap_filter,
                     EncoderType::Vaapi,
+                )
+            }
+            VideoEncoder::V4l2m2m => {
+                let settings = config.v4l2m2m.as_ref().expect("V4L2M2M settings required");
+
+                // V4L2M2M uses the kernel V4L2 API directly — no hwaccel flags needed.
+                // All scaling is done in software; most ARM v4l2m2m drivers only support yuv420p.
+                let hwaccel = String::new();
+
+                let mut params = format!(
+                    "-c:v {} -qp {} -num_capture_buffers {}",
+                    settings.codec, settings.qp, settings.num_capture_buffers
+                );
+
+                if let Some(max_kbps) = settings.max_bitrate_kbps {
+                    params.push_str(&format!(" -maxrate {}k -bufsize {}k", max_kbps, max_kbps * 2));
+                }
+
+                (
+                    hwaccel,
+                    params,
+                    tonemap_filter,
+                    EncoderType::V4l2m2m,
                 )
             }
         }
@@ -3931,6 +3997,20 @@ async fn transcode_video(
                         hwaccel_args, input_file, w, h, codec_params, output_file
                     )
                 }
+            }
+            EncoderType::V4l2m2m => {
+                // V4L2M2M: pure software path — scale + optional HDR tonemapping in CPU,
+                // then hand off frames to the kernel encoder via V4L2.
+                // Most ARM v4l2m2m drivers only accept yuv420p (8-bit).
+                let filter_chain = if hdr_info.is_hdr && !tonemap_filter.is_empty() {
+                    format!("{},scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p", tonemap_filter, w, h)
+                } else {
+                    format!("scale={}:{}:force_original_aspect_ratio=decrease,format=yuv420p", w, h)
+                };
+                format!(
+                    "ffmpeg -nostdin -y -analyzeduration 1000M -probesize 1000M -i '{}' -vf '{}' {} -an -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof '{}'",
+                    input_file, filter_chain, codec_params, output_file
+                )
             }
         };
 
