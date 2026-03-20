@@ -88,6 +88,36 @@ For example, with `"languages": ["en", "cs"]`:
 
 If `translation.languages` is empty or omitted, the old behavior is preserved (`AI_transcription` naming, no translation, no llama.cpp dependency).
 
+### Disabling Whisper and llama.cpp
+
+Both services are **disabled by default**. To run the processor without any dependency on Whisper or llama.cpp, either omit both sections from `config.json` entirely or set them explicitly:
+
+```json
+{
+    "dbconnection": "postgresql://user:password@host:5432/db",
+    "whisper": {
+        "url": null
+    },
+    "translation": {
+        "languages": []
+    },
+    "video": { }
+}
+```
+
+**Disabling Whisper transcription** — set `whisper.url` to `null` or omit the `url` field. When `url` is absent or `null`, the processor never contacts a Whisper server. Media files that have no embedded subtitles simply produce no subtitle output; no network connection is attempted.
+
+**Disabling llama.cpp translation** — set `translation.languages` to an empty array `[]` or omit the `translation` section entirely. When the languages list is empty, the processor skips the entire translation pipeline: no llama.cpp server is contacted, Whisper output uses the `output_label` filename (`AI_transcription.vtt` by default) instead of per-language naming, and embedded subtitle tracks are not renamed.
+
+Either service can be disabled independently of the other. The minimum working configuration for a processor with no external AI dependencies is:
+
+```json
+{
+    "dbconnection": "postgresql://user:password@host:5432/db",
+    "video": { }
+}
+```
+
 ## Configuration
 
 All settings are defined in `config.json`. See `config.json.example` for a complete reference. Every section except `dbconnection` and `video` has sensible defaults and can be omitted.
@@ -117,7 +147,7 @@ Long audio files are automatically split into chunks at silence boundaries to av
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `url` | `http://whisper:8080/inference` | Whisper.cpp server endpoint |
+| `url` | `null` (disabled) | Whisper.cpp server endpoint. When `null` or omitted, Whisper transcription is disabled entirely |
 | `model` | `whisper-1` | Model name sent to the API |
 | `response_format` | `vtt` | Subtitle format (`vtt`) |
 | `output_label` | `AI_transcription` | Filename label for generated subtitles |
