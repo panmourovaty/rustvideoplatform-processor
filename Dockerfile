@@ -39,7 +39,10 @@ WORKDIR /app
 COPY --from=builder /src/rustvideoplatform-processor/target/release/rustvideoplatform-processor /opt/rustvideoplatform-processor
 
 ARG TARGETARCH
-RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium intel-media-driver onevpl-intel-gpu; \
+RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium libgcc; \
+    case "$TARGETARCH" in \
+        amd64) apk add --no-cache intel-media-driver onevpl-intel-gpu ;; \
+    esac; \
     PDFIUM_ARCH=""; \
     case "$TARGETARCH" in \
         amd64) PDFIUM_ARCH="x64" ;; \
