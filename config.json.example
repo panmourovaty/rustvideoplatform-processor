@@ -79,18 +79,21 @@
             "rc": "vbr",
             "cq": 26,
             "lookahead": 32,
-            "temporal_aq": true
+            "temporal_aq": true,
+            "max_bitrate_kbps": 50000
         },
         "qsv": {
             "codec": "av1_qsv",
             "preset": "veryslow",
             "global_quality": 28,
-            "look_ahead_depth": 100
+            "look_ahead_depth": 100,
+            "max_bitrate_kbps": 50000
         },
         "vaapi": {
             "codec": "av1_vaapi",
             "quality": 51,
-            "compression_ratio": 5
+            "compression_ratio": 5,
+            "max_bitrate_kbps": 50000
         },
         "v4l2m2m": {
             "codec": "hevc_v4l2m2m",

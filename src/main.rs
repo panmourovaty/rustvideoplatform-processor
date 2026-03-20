@@ -104,6 +104,8 @@ struct NvencSettings {
     lookahead: Option<u32>,
     #[serde(default)]
     temporal_aq: Option<bool>,
+    #[serde(default)]
+    max_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -113,6 +115,8 @@ struct QsvSettings {
     global_quality: u32,
     #[serde(default)]
     look_ahead_depth: u32,
+    #[serde(default)]
+    max_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -120,6 +124,8 @@ struct VaapiSettings {
     codec: String,
     quality: u32,
     compression_ratio: u32,
+    #[serde(default)]
+    max_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -3530,6 +3536,9 @@ fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInf
                 if settings.temporal_aq.unwrap_or(false) {
                     params.push_str(" -temporal-aq 1");
                 }
+                if let Some(max_kbps) = settings.max_bitrate_kbps {
+                    params.push_str(&format!(" -maxrate {}k -bufsize {}k", max_kbps, max_kbps * 2));
+                }
 
                 (
                     hwaccel,
@@ -3563,6 +3572,9 @@ fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInf
                     // global_quality is the QSV quality knob used by la_icq/ICQ-style modes
                     params.push_str(&format!(" -global_quality:v {}", settings.global_quality));
                 }
+                if let Some(max_kbps) = settings.max_bitrate_kbps {
+                    params.push_str(&format!(" -maxrate {}k -bufsize {}k", max_kbps, max_kbps * 2));
+                }
 
                 (
                     hwaccel,
@@ -3588,6 +3600,9 @@ fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInf
                 );
 
                 params.push_str(" -compression_level 7");
+                if let Some(max_kbps) = settings.max_bitrate_kbps {
+                    params.push_str(&format!(" -maxrate {}k -bufsize {}k", max_kbps, max_kbps * 2));
+                }
 
                 (
                     hwaccel,
