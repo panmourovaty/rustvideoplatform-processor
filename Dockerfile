@@ -13,7 +13,6 @@ COPY Cargo.toml /src/rustvideoplatform-processor/
 RUN mkdir -p /src/rustvideoplatform-processor/src && echo 'fn main() {}' > /src/rustvideoplatform-processor/src/main.rs
 RUN case "$TARGETARCH" in \
         amd64)   export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
-        arm64)   FEATURES="--features pdf" ;; \
         ppc64le) export RUSTFLAGS="-C target-cpu=pwr8" ;; \
     esac && \
     cd /src/rustvideoplatform-processor && cargo build --release $FEATURES 2>/dev/null ; true
@@ -24,7 +23,6 @@ COPY ./ /src/rustvideoplatform-processor
 RUN find /src/rustvideoplatform-processor/src -name '*.rs' -exec touch {} + && \
     case "$TARGETARCH" in \
         amd64)   export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
-        arm64)   FEATURES="--features pdf" ;; \
         ppc64le) export RUSTFLAGS="-C target-cpu=pwr8" ;; \
     esac && \
     cd /src/rustvideoplatform-processor && cargo build --release $FEATURES
@@ -39,7 +37,10 @@ WORKDIR /app
 COPY --from=builder /src/rustvideoplatform-processor/target/release/rustvideoplatform-processor /opt/rustvideoplatform-processor
 
 ARG TARGETARCH
-RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium intel-media-driver onevpl-intel-gpu; \
+RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium libgcc; \
+    case "$TARGETARCH" in \
+        amd64) apk add --no-cache intel-media-driver onevpl-intel-gpu ;; \
+    esac; \
     PDFIUM_ARCH=""; \
     case "$TARGETARCH" in \
         amd64) PDFIUM_ARCH="x64" ;; \
