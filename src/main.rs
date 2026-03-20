@@ -131,6 +131,11 @@ struct V4l2m2mSettings {
     /// Number of V4L2 capture buffers. More buffers improve throughput on ARM.
     #[serde(default = "default_v4l2m2m_num_capture_buffers")]
     num_capture_buffers: u32,
+    /// Optional peak bitrate cap in Kbps (e.g. 50000 = 50 Mbit/s).
+    /// Sets -maxrate and -bufsize (2x maxrate) to prevent bitrate spikes.
+    /// Leave unset for unconstrained QP-only encoding.
+    #[serde(default)]
+    max_bitrate_kbps: Option<u32>,
 }
 
 fn default_v4l2m2m_num_capture_buffers() -> u32 { 64 }
@@ -3598,10 +3603,14 @@ fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInf
                 // All scaling is done in software; most ARM v4l2m2m drivers only support yuv420p.
                 let hwaccel = String::new();
 
-                let params = format!(
+                let mut params = format!(
                     "-c:v {} -qp {} -num_capture_buffers {}",
                     settings.codec, settings.qp, settings.num_capture_buffers
                 );
+
+                if let Some(max_kbps) = settings.max_bitrate_kbps {
+                    params.push_str(&format!(" -maxrate {}k -bufsize {}k", max_kbps, max_kbps * 2));
+                }
 
                 (
                     hwaccel,

@@ -95,7 +95,8 @@
         "v4l2m2m": {
             "codec": "hevc_v4l2m2m",
             "qp": 28,
-            "num_capture_buffers": 64
+            "num_capture_buffers": 64,
+            "max_bitrate_kbps": 50000
         },
 
         "dash": {
