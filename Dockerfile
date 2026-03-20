@@ -44,6 +44,7 @@ RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium
     PDFIUM_ARCH=""; \
     case "$TARGETARCH" in \
         amd64) PDFIUM_ARCH="x64" ;; \
+        arm64) PDFIUM_ARCH="arm64" ;; \
     esac; \
     if [ -n "$PDFIUM_ARCH" ]; then \
         wget -q "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-musl-${PDFIUM_ARCH}.tgz" -O /tmp/pdfium.tgz \
