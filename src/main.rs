@@ -3594,15 +3594,21 @@ fn build_encoder_params(config: &VideoConfig, _framerate: f32, hdr_info: &HdrInf
                 };
 
                 let quality = settings.quality;
-                let mut params = format!(
-                    "-c:v {} -global_quality {} -qp {}",
-                    settings.codec, quality, quality
-                );
-
-                params.push_str(" -compression_level 7");
-                if let Some(max_kbps) = settings.max_bitrate_kbps {
-                    params.push_str(&format!(" -maxrate {}k -bufsize {}k", max_kbps, max_kbps * 2));
-                }
+                // When max_bitrate_kbps is set we must switch to VBR mode: combining -qp
+                // (CQP) with -maxrate (VBR) produces conflicting mode signals that VAAPI
+                // drivers silently ignore, making the cap ineffective.  In VBR mode we
+                // drop -qp and drive the encoder with a bitrate ceiling instead.
+                let params = if let Some(max_kbps) = settings.max_bitrate_kbps {
+                    format!(
+                        "-c:v {} -b:v {}k -maxrate {}k -bufsize {}k -compression_level 7",
+                        settings.codec, max_kbps, max_kbps, max_kbps * 2
+                    )
+                } else {
+                    format!(
+                        "-c:v {} -global_quality {} -qp {} -compression_level 7",
+                        settings.codec, quality, quality
+                    )
+                };
 
                 (
                     hwaccel,
