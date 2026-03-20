@@ -13,7 +13,6 @@ COPY Cargo.toml /src/rustvideoplatform-processor/
 RUN mkdir -p /src/rustvideoplatform-processor/src && echo 'fn main() {}' > /src/rustvideoplatform-processor/src/main.rs
 RUN case "$TARGETARCH" in \
         amd64)   export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
-        arm64)   FEATURES="--features pdf" ;; \
         ppc64le) export RUSTFLAGS="-C target-cpu=pwr8" ;; \
     esac && \
     cd /src/rustvideoplatform-processor && cargo build --release $FEATURES 2>/dev/null ; true
@@ -24,7 +23,6 @@ COPY ./ /src/rustvideoplatform-processor
 RUN find /src/rustvideoplatform-processor/src -name '*.rs' -exec touch {} + && \
     case "$TARGETARCH" in \
         amd64)   export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
-        arm64)   FEATURES="--features pdf" ;; \
         ppc64le) export RUSTFLAGS="-C target-cpu=pwr8" ;; \
     esac && \
     cd /src/rustvideoplatform-processor && cargo build --release $FEATURES
@@ -46,7 +44,6 @@ RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium
     PDFIUM_ARCH=""; \
     case "$TARGETARCH" in \
         amd64) PDFIUM_ARCH="x64" ;; \
-        arm64) PDFIUM_ARCH="arm64" ;; \
     esac; \
     if [ -n "$PDFIUM_ARCH" ]; then \
         wget -q "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-musl-${PDFIUM_ARCH}.tgz" -O /tmp/pdfium.tgz \
