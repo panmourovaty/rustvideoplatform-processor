@@ -1,5 +1,6 @@
 {
-    "dbconnection": "postgresql://user:password@localhost:5432/database",
+    "scylla_nodes": ["scylladb:9042"],
+    "scylla_keyspace": "videoplatform",
 
     "whisper": {
         "url": "http://whisper:8080/inference",
@@ -15,7 +16,7 @@
 
     "translation": {
         "languages": ["en", "cs"],
-        "llama_url": "http://llama:8081",
+        "llama_url": "http://translatellama:8083",
         "source_language": "en",
         "timeout_secs": 120
     },
