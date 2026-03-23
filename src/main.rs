@@ -10,8 +10,8 @@ use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+mod db;
+
 use std::process::Command;
 use std::time::Duration;
 use reqwest::blocking::{Client, multipart};
@@ -58,7 +58,8 @@ struct FfprobeTags {
 
 #[derive(Deserialize, Clone)]
 struct Config {
-    dbconnection: String,
+    scylla_nodes: Vec<String>,
+    scylla_keyspace: String,
     video: VideoConfig,
     #[serde(default = "default_whisper_config")]
     whisper: WhisperConfig,
@@ -511,20 +512,18 @@ async fn main() {
         std::process::exit(1);
     });
 
-    eprintln!("Config loaded, connecting to database...");
+    eprintln!("Config loaded, connecting to ScyllaDB...");
 
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&config.dbconnection)
+    let db = db::ScyllaDb::connect(&config.scylla_nodes, &config.scylla_keyspace)
         .await
         .unwrap_or_else(|e| {
-            eprintln!("Failed to connect to database: {}", e);
+            eprintln!("Failed to connect to ScyllaDB: {}", e);
             std::process::exit(1);
         });
 
-    eprintln!("Database connected, starting processing loop.");
+    eprintln!("ScyllaDB connected, starting processing loop.");
 
-    process(pool, config).await;
+    process(db, config).await;
 
     // The processing loop should never return - if it does, something is wrong
     eprintln!("ERROR: Processing loop exited unexpectedly!");
@@ -800,116 +799,128 @@ fn detect_file_type(input_file: &str) -> Option<String> {
     return None;
 }
 
-async fn process(pool: PgPool, config: Config) {
+async fn process(db: db::ScyllaDb, config: Config) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(60000));
 
     loop {
         interval.tick().await;
-        let unprocessed_concepts =
-            match sqlx::query!("SELECT id,type FROM media_concepts WHERE processed = false;")
-                .fetch_all(&pool)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(e) => {
-                    eprintln!("Database query error (will retry): {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
+        let unprocessed_concepts = match db.session.execute_unpaged(&db.get_unprocessed_concepts, &[])
+            .await
+            .ok()
+            .and_then(|r| r.into_rows_result().ok())
+        {
+            Some(rows) => {
+                rows.rows::<(String, String)>().unwrap()
+                    .filter_map(|r| r.ok())
+                    .collect::<Vec<_>>()
+            }
+            None => {
+                eprintln!("Database query error (will retry)");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
 
-        for concept in unprocessed_concepts {
-            let input_file = format!("{}/{}", config.upload_path, concept.id);
+        for (concept_id, concept_type) in unprocessed_concepts {
+            let input_file = format!("{}/{}", config.upload_path, concept_id);
 
             // Check that the upload file actually exists before attempting processing
             if !std::path::Path::new(&input_file).exists() {
                 eprintln!(
                     "Upload file not found for concept {}, marking as processed to avoid infinite retry",
-                    concept.id
+                    concept_id
                 );
-                if let Err(e) = sqlx::query!(
-                    "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                    concept.id
-                )
-                .execute(&pool)
-                .await
-                {
-                    eprintln!("Failed to mark missing concept {} as processed: {}", concept.id, e);
+                // Get the concept owner for the by_owner table
+                let owner = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
+                    .await
+                    .ok()
+                    .and_then(|r| r.into_rows_result().ok())
+                    .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten())
+                    .map(|(_, _, owner, _, _)| owner);
+
+                let _ = db.session.execute_unpaged(&db.mark_concept_processed, (&concept_id,)).await;
+                if let Some(ref owner) = owner {
+                    let _ = db.session.execute_unpaged(&db.mark_concept_processed_by_owner, (owner, &concept_id)).await;
                 }
+                let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
                 continue;
             }
 
             // For special types like vtt_translate, skip file type detection
-            let actual_type = if concept.r#type == "vtt_translate" {
-                concept.r#type.clone()
+            let actual_type = if concept_type == "vtt_translate" {
+                concept_type.clone()
             } else {
                 let detected_type = detect_file_type(&input_file);
                 // Override database type if detection yields different result
                 if let Some(dt) = detected_type {
                     dt
                 } else {
-                    concept.r#type.clone()
+                    concept_type.clone()
                 }
             };
 
             let process_result: Result<(), String> = if actual_type == "video" {
-                println!("processing concept: {} as video", concept.id);
-                process_video(concept.id.clone(), pool.clone(), &config)
+                println!("processing concept: {} as video", concept_id);
+                process_video(concept_id.clone(), &db, &config)
                     .await
                     .map_err(|e| format!("video processing failed: {}", e))
             } else if actual_type == "picture" {
-                println!("processing concept: {} as picture", concept.id);
-                process_picture(concept.id.clone(), pool.clone(), &config.picture, &config.upload_path)
+                println!("processing concept: {} as picture", concept_id);
+                process_picture(concept_id.clone(), &db, &config.picture, &config.upload_path)
                     .await
                     .map_err(|e| format!("picture processing failed: {}", e))
             } else if actual_type == "audio" {
-                println!("processing concept: {} as audio", concept.id);
-                process_audio(concept.id.clone(), pool.clone(), &config.audio, &config.whisper, &config.picture, &config.translation, &config.upload_path)
+                println!("processing concept: {} as audio", concept_id);
+                process_audio(concept_id.clone(), &db, &config.audio, &config.whisper, &config.picture, &config.translation, &config.upload_path)
                     .await
                     .map_err(|e| format!("audio processing failed: {}", e))
             } else if actual_type == "document_pdf" {
                 #[cfg(feature = "pdf")]
                 {
-                    println!("processing concept: {} as document_pdf", concept.id);
-                    process_document_pdf(concept.id.clone(), pool.clone(), &config.pdf, &config.upload_path)
+                    println!("processing concept: {} as document_pdf", concept_id);
+                    process_document_pdf(concept_id.clone(), &db, &config.pdf, &config.upload_path)
                         .await
                         .map_err(|e| format!("document_pdf processing failed: {}", e))
                 }
                 #[cfg(not(feature = "pdf"))]
                 {
-                    eprintln!("PDF processing not available (built without pdf feature) for concept {}, skipping", concept.id);
+                    eprintln!("PDF processing not available (built without pdf feature) for concept {}, skipping", concept_id);
                     Ok(())
                 }
             } else if actual_type == "vtt_translate" {
-                println!("processing concept: {} as vtt_translate", concept.id);
-                process_vtt_translate(concept.id.clone(), pool.clone(), &config.translation, &config.upload_path, &config.source_path)
+                println!("processing concept: {} as vtt_translate", concept_id);
+                process_vtt_translate(concept_id.clone(), &db, &config.translation, &config.upload_path, &config.source_path)
                     .await
                     .map_err(|e| format!("vtt_translate processing failed: {}", e))
             } else {
                 eprintln!(
                     "Unknown media type '{}' for concept {}, marking as processed",
-                    actual_type, concept.id
+                    actual_type, concept_id
                 );
-                if let Err(e) = sqlx::query!(
-                    "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                    concept.id
-                )
-                .execute(&pool)
-                .await
-                {
-                    eprintln!("Failed to mark unknown-type concept {} as processed: {}", concept.id, e);
+                // Get the concept owner for the by_owner table
+                let owner = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
+                    .await
+                    .ok()
+                    .and_then(|r| r.into_rows_result().ok())
+                    .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten())
+                    .map(|(_, _, owner, _, _)| owner);
+
+                let _ = db.session.execute_unpaged(&db.mark_concept_processed, (&concept_id,)).await;
+                if let Some(ref owner) = owner {
+                    let _ = db.session.execute_unpaged(&db.mark_concept_processed_by_owner, (owner, &concept_id)).await;
                 }
+                let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
                 continue;
             };
 
             if let Err(e) = process_result {
-                eprintln!("Error processing concept {}: {}", concept.id, e);
+                eprintln!("Error processing concept {}: {}", concept_id, e);
             }
         }
     }
 }
 
-async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Result<(), String> {
+async fn process_video(concept_id: String, db: &db::ScyllaDb, config: &Config) -> Result<(), String> {
     fs::create_dir_all(format!("{}/{}_processing", config.upload_path, &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
@@ -962,13 +973,19 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
                 }).await;
             }
 
-            sqlx::query!(
-                "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                concept_id
-            )
-            .execute(&pool)
-            .await
-            .map_err(|e| format!("Database update error: {}", e))?;
+            // Get the concept owner for the by_owner table
+            let owner = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
+                .await
+                .ok()
+                .and_then(|r| r.into_rows_result().ok())
+                .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten())
+                .map(|(_, _, owner, _, _)| owner);
+
+            let _ = db.session.execute_unpaged(&db.mark_concept_processed, (&concept_id,)).await;
+            if let Some(ref owner) = owner {
+                let _ = db.session.execute_unpaged(&db.mark_concept_processed_by_owner, (owner, &concept_id)).await;
+            }
+            let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
             let _ = fs::remove_file(format!("{}/{}", config.upload_path, concept_id).as_str());
             Ok(())
         }
@@ -976,7 +993,7 @@ async fn process_video(concept_id: String, pool: PgPool, config: &Config) -> Res
     }
 }
 
-async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_config: &TranslationConfig, upload_path: &str, source_path: &str) -> Result<(), String> {
+async fn process_vtt_translate(concept_id: String, db: &db::ScyllaDb, translation_config: &TranslationConfig, upload_path: &str, source_path: &str) -> Result<(), String> {
     let meta_path = format!("{}/{}", upload_path, concept_id);
     let meta_str = fs::read_to_string(&meta_path)
         .map_err(|e| format!("Failed to read vtt_translate metadata: {}", e))?;
@@ -996,11 +1013,19 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
 
     if !std::path::Path::new(&source_vtt_path).exists() {
         let _ = fs::remove_file(&meta_path);
-        sqlx::query("DELETE FROM media_concepts WHERE id = $1;")
-            .bind(&concept_id)
-            .execute(&pool)
+        // Get the concept owner for the by_owner table
+        let owner = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
             .await
-            .map_err(|e| format!("Database delete error: {}", e))?;
+            .ok()
+            .and_then(|r| r.into_rows_result().ok())
+            .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten())
+            .map(|(_, _, owner, _, _)| owner);
+
+        let _ = db.session.execute_unpaged(&db.delete_concept, (&concept_id,)).await;
+        if let Some(ref owner) = owner {
+            let _ = db.session.execute_unpaged(&db.delete_concept_by_owner, (owner, &concept_id)).await;
+        }
+        let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
         return Err(format!("Source subtitle file not found: {}", source_vtt_path));
     }
 
@@ -1054,11 +1079,19 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
 
     // Clean up and mark as processed
     let _ = fs::remove_file(&meta_path);
-    sqlx::query("DELETE FROM media_concepts WHERE id = $1;")
-        .bind(&concept_id)
-        .execute(&pool)
+    // Get the concept owner for the by_owner table
+    let owner = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
         .await
-        .map_err(|e| format!("Database delete error: {}", e))?;
+        .ok()
+        .and_then(|r| r.into_rows_result().ok())
+        .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten())
+        .map(|(_, _, owner, _, _)| owner);
+
+    let _ = db.session.execute_unpaged(&db.delete_concept, (&concept_id,)).await;
+    if let Some(ref owner) = owner {
+        let _ = db.session.execute_unpaged(&db.delete_concept_by_owner, (owner, &concept_id)).await;
+    }
+    let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
 
     if success {
         Ok(())
@@ -1067,7 +1100,7 @@ async fn process_vtt_translate(concept_id: String, pool: PgPool, translation_con
     }
 }
 
-async fn process_picture(concept_id: String, pool: PgPool, picture_config: &PictureConfig, upload_path: &str) -> Result<(), String> {
+async fn process_picture(concept_id: String, db: &db::ScyllaDb, picture_config: &PictureConfig, upload_path: &str) -> Result<(), String> {
     fs::create_dir_all(format!("{}/{}_processing", upload_path, &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
     let transcode_result = transcode_picture(
@@ -1077,13 +1110,19 @@ async fn process_picture(concept_id: String, pool: PgPool, picture_config: &Pict
     ).await;
     match transcode_result {
         Ok(()) => {
-            sqlx::query!(
-                "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                concept_id
-            )
-            .execute(&pool)
-            .await
-            .map_err(|e| format!("Database update error: {}", e))?;
+            // Get the concept owner for the by_owner table
+            let owner = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
+                .await
+                .ok()
+                .and_then(|r| r.into_rows_result().ok())
+                .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten())
+                .map(|(_, _, owner, _, _)| owner);
+
+            let _ = db.session.execute_unpaged(&db.mark_concept_processed, (&concept_id,)).await;
+            if let Some(ref owner) = owner {
+                let _ = db.session.execute_unpaged(&db.mark_concept_processed_by_owner, (owner, &concept_id)).await;
+            }
+            let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
             let _ = fs::remove_file(format!("{}/{}", upload_path, concept_id).as_str());
             Ok(())
         }
@@ -1091,7 +1130,7 @@ async fn process_picture(concept_id: String, pool: PgPool, picture_config: &Pict
     }
 }
 
-async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTranscodeConfig, whisper_config: &WhisperConfig, picture_config: &PictureConfig, translation_config: &TranslationConfig, upload_path: &str) -> Result<(), String> {
+async fn process_audio(concept_id: String, db: &db::ScyllaDb, audio_config: &AudioTranscodeConfig, whisper_config: &WhisperConfig, picture_config: &PictureConfig, translation_config: &TranslationConfig, upload_path: &str) -> Result<(), String> {
     fs::create_dir_all(format!("{}/{}_processing", upload_path, &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
@@ -1122,13 +1161,19 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
     let transcode_result: Result<(), String> = transcode_result.map_err(|e| format!("{}", e));
     match transcode_result {
         Ok(()) => {
-            sqlx::query!(
-                "UPDATE media_concepts SET processed = true WHERE id = $1;",
-                concept_id
-            )
-            .execute(&pool)
-            .await
-            .map_err(|e| format!("Database update error: {}", e))?;
+            // Get the concept owner for the by_owner table
+            let owner = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
+                .await
+                .ok()
+                .and_then(|r| r.into_rows_result().ok())
+                .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten())
+                .map(|(_, _, owner, _, _)| owner);
+
+            let _ = db.session.execute_unpaged(&db.mark_concept_processed, (&concept_id,)).await;
+            if let Some(ref owner) = owner {
+                let _ = db.session.execute_unpaged(&db.mark_concept_processed_by_owner, (owner, &concept_id)).await;
+            }
+            let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
             let _ = fs::remove_file(format!("{}/{}", upload_path, concept_id).as_str());
             Ok(())
         }
@@ -1137,7 +1182,7 @@ async fn process_audio(concept_id: String, pool: PgPool, audio_config: &AudioTra
 }
 
 #[cfg(feature = "pdf")]
-async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &PdfConfig, upload_path: &str) -> Result<(), String> {
+async fn process_document_pdf(concept_id: String, db: &db::ScyllaDb, pdf_config: &PdfConfig, upload_path: &str) -> Result<(), String> {
     fs::create_dir_all(format!("{}/{}_processing", upload_path, &concept_id))
         .map_err(|e| format!("Failed to create processing directory: {}", e))?;
 
@@ -1173,13 +1218,19 @@ async fn process_document_pdf(concept_id: String, pool: PgPool, pdf_config: &Pdf
     // Require at least thumbnails to succeed
     thumb_result?;
 
-    sqlx::query!(
-        "UPDATE media_concepts SET processed = true WHERE id = $1;",
-        concept_id
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Database update error: {}", e))?;
+    // Get the concept owner for the by_owner table
+    let owner = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
+        .await
+        .ok()
+        .and_then(|r| r.into_rows_result().ok())
+        .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten())
+        .map(|(_, _, owner, _, _)| owner);
+
+    let _ = db.session.execute_unpaged(&db.mark_concept_processed, (&concept_id,)).await;
+    if let Some(ref owner) = owner {
+        let _ = db.session.execute_unpaged(&db.mark_concept_processed_by_owner, (owner, &concept_id)).await;
+    }
+    let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
 
     // Move the file into the processing folder and rename it to 'document.pdf'
     let dest_file = format!("{}/document.pdf", output_dir);
