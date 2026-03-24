@@ -11,7 +11,9 @@ ARG TARGETARCH
 # Pre-build dependencies (cached layer - only invalidated when Cargo.toml changes)
 COPY Cargo.toml /src/rustvideoplatform-processor/
 RUN mkdir -p /src/rustvideoplatform-processor/src && echo 'fn main() {}' > /src/rustvideoplatform-processor/src/main.rs
-RUN case "$TARGETARCH" in \
+RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/root/.cargo/registry \
+    --mount=type=cache,id=rustvideoplatform-processor-target-${TARGETARCH},target=/src/rustvideoplatform-processor/target \
+    case "$TARGETARCH" in \
         amd64)   export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
         ppc64le) export RUSTFLAGS="-C target-cpu=pwr8" ;; \
     esac && \
@@ -20,12 +22,15 @@ RUN case "$TARGETARCH" in \
 # Build actual project
 COPY ./ /src/rustvideoplatform-processor
 # Touch source files to ensure cargo detects changes over the dummy pre-build
-RUN find /src/rustvideoplatform-processor/src -name '*.rs' -exec touch {} + && \
+RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/root/.cargo/registry \
+    --mount=type=cache,id=rustvideoplatform-processor-target-${TARGETARCH},target=/src/rustvideoplatform-processor/target \
+    find /src/rustvideoplatform-processor/src -name '*.rs' -exec touch {} + && \
     case "$TARGETARCH" in \
         amd64)   export RUSTFLAGS="-C target-cpu=x86-64-v2"; FEATURES="--features pdf" ;; \
         ppc64le) export RUSTFLAGS="-C target-cpu=pwr8" ;; \
     esac && \
-    cd /src/rustvideoplatform-processor && cargo build --release $FEATURES
+    cd /src/rustvideoplatform-processor && cargo build --release $FEATURES && \
+    cp target/release/rustvideoplatform-processor /rustvideoplatform-processor
 
 FROM alpine:edge
 
@@ -34,7 +39,7 @@ RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/reposit
 
 WORKDIR /app
 
-COPY --from=builder /src/rustvideoplatform-processor/target/release/rustvideoplatform-processor /opt/rustvideoplatform-processor
+COPY --from=builder /rustvideoplatform-processor /opt/rustvideoplatform-processor
 
 ARG TARGETARCH
 RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium libgcc; \
