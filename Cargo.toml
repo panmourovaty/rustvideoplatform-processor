@@ -20,3 +20,4 @@ pdfium-render = { version = "0.8", features = ["image", "thread_safe"], optional
 pdf_oxide = { version = "0.3", optional = true }
 image = { version = "0.25", optional = true }
 ttf2woff2 = { version = "0.10", default-features = false }
+isolang = { version = "2", features = ["english_names", "lowercase_names"] }

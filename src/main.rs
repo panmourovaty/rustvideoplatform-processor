@@ -1551,6 +1551,8 @@ fn sanitize_filename(name: &str) -> String {
 /// Normalize a language code to ISO 639-1 (two-letter) format.
 /// Handles ISO 639-2/B (e.g., "eng"), ISO 639-2/T (e.g., "ces"), and common full names.
 fn normalize_language_code(code: &str) -> Option<String> {
+    use isolang::Language;
+
     let code_lower = code.to_lowercase();
     let code_lower = code_lower.trim();
 
@@ -1563,72 +1565,31 @@ fn normalize_language_code(code: &str) -> Option<String> {
         return Some(code_lower.to_string());
     }
 
-    // ISO 639-2/B and 639-2/T (3-letter) to ISO 639-1
+    // ISO 639-3 covers 639-2/T codes; try library lookup first
     if code_lower.len() == 3 {
-        let mapped = match &*code_lower {
-            "eng" => "en", "cze" | "ces" => "cs", "ger" | "deu" => "de",
-            "fre" | "fra" => "fr", "spa" => "es", "ita" => "it",
-            "por" => "pt", "rus" => "ru", "jpn" => "ja", "kor" => "ko",
-            "chi" | "zho" => "zh", "ara" => "ar", "hin" => "hi",
-            "pol" => "pl", "dut" | "nld" => "nl", "swe" => "sv",
-            "dan" => "da", "nor" | "nob" | "nno" => "no", "fin" => "fi",
-            "hun" => "hu", "tur" => "tr", "gre" | "ell" => "el",
-            "heb" => "he", "tha" => "th", "vie" => "vi", "ind" => "id",
-            "may" | "msa" => "ms", "ukr" => "uk", "rum" | "ron" => "ro",
-            "bul" => "bg", "hrv" | "scr" => "hr", "slo" | "slk" => "sk",
-            "slv" => "sl", "srp" | "scc" => "sr", "lit" => "lt",
-            "lav" => "lv", "est" => "et", "cat" => "ca", "glg" => "gl",
-            "baq" | "eus" => "eu", "wel" | "cym" => "cy", "gle" => "ga",
-            "ice" | "isl" => "is", "mac" | "mkd" => "mk", "alb" | "sqi" => "sq",
-            "bos" => "bs", "mlt" => "mt", "ltz" => "lb", "afr" => "af",
-            "swa" => "sw", "tgl" => "tl", "ben" => "bn", "tam" => "ta",
-            "tel" => "te", "mal" => "ml", "kan" => "kn", "guj" => "gu",
-            "mar" => "mr", "nep" => "ne", "sin" => "si", "khm" => "km",
-            "lao" => "lo", "bur" | "mya" => "my", "geo" | "kat" => "ka",
-            "amh" => "am", "per" | "fas" => "fa", "urd" => "ur",
-            "pus" => "ps", "kur" => "ku", "lat" => "la", "epo" => "eo",
+        if let Some(lang) = Language::from_639_3(code_lower) {
+            return lang.to_639_1().map(str::to_string);
+        }
+        // ISO 639-2/B codes that differ from their ISO 639-2/T (= 639-3) equivalents
+        let t_code = match code_lower {
+            "fre" => "fra", "ger" => "deu", "cze" => "ces",
+            "chi" => "zho", "gre" => "ell", "dut" => "nld",
+            "rum" => "ron", "slo" => "slk", "mac" => "mkd",
+            "alb" => "sqi", "bur" => "mya", "per" => "fas",
+            "baq" => "eus", "wel" => "cym", "ice" => "isl",
+            "geo" => "kat", "may" => "msa", "scr" => "hrv",
+            "scc" => "srp",
             _ => return None,
         };
-        return Some(mapped.to_string());
+        return Language::from_639_3(t_code)
+            .and_then(|l| l.to_639_1())
+            .map(str::to_string);
     }
 
-    // Full language names
-    match &*code_lower {
-        "english" => Some("en".to_string()),
-        "czech" => Some("cs".to_string()),
-        "german" => Some("de".to_string()),
-        "french" => Some("fr".to_string()),
-        "spanish" => Some("es".to_string()),
-        "italian" => Some("it".to_string()),
-        "portuguese" => Some("pt".to_string()),
-        "russian" => Some("ru".to_string()),
-        "japanese" => Some("ja".to_string()),
-        "korean" => Some("ko".to_string()),
-        "chinese" => Some("zh".to_string()),
-        "arabic" => Some("ar".to_string()),
-        "hindi" => Some("hi".to_string()),
-        "polish" => Some("pl".to_string()),
-        "dutch" => Some("nl".to_string()),
-        "swedish" => Some("sv".to_string()),
-        "danish" => Some("da".to_string()),
-        "norwegian" => Some("no".to_string()),
-        "finnish" => Some("fi".to_string()),
-        "hungarian" => Some("hu".to_string()),
-        "turkish" => Some("tr".to_string()),
-        "greek" => Some("el".to_string()),
-        "hebrew" => Some("he".to_string()),
-        "thai" => Some("th".to_string()),
-        "vietnamese" => Some("vi".to_string()),
-        "indonesian" => Some("id".to_string()),
-        "ukrainian" => Some("uk".to_string()),
-        "romanian" => Some("ro".to_string()),
-        "bulgarian" => Some("bg".to_string()),
-        "croatian" => Some("hr".to_string()),
-        "slovak" => Some("sk".to_string()),
-        "slovenian" => Some("sl".to_string()),
-        "serbian" => Some("sr".to_string()),
-        _ => None,
-    }
+    // Full English name (already lowercased)
+    Language::from_name_lowercase(code_lower)
+        .and_then(|l| l.to_639_1())
+        .map(str::to_string)
 }
 
 /// Detect the language of an audio file using Whisper.cpp verbose_json response.
