@@ -1549,7 +1549,7 @@ fn sanitize_filename(name: &str) -> String {
 }
 
 /// Normalize a language code to ISO 639-1 (two-letter) format.
-/// Handles ISO 639-2/B (e.g., "eng"), ISO 639-2/T (e.g., "ces"), and common full names.
+/// Handles ISO 639-3/2T three-letter codes (e.g., "eng", "ces") and full English names.
 fn normalize_language_code(code: &str) -> Option<String> {
     use isolang::Language;
 
@@ -1565,23 +1565,8 @@ fn normalize_language_code(code: &str) -> Option<String> {
         return Some(code_lower.to_string());
     }
 
-    // ISO 639-3 covers 639-2/T codes; try library lookup first
     if code_lower.len() == 3 {
-        if let Some(lang) = Language::from_639_3(code_lower) {
-            return lang.to_639_1().map(str::to_string);
-        }
-        // ISO 639-2/B codes that differ from their ISO 639-2/T (= 639-3) equivalents
-        let t_code = match code_lower {
-            "fre" => "fra", "ger" => "deu", "cze" => "ces",
-            "chi" => "zho", "gre" => "ell", "dut" => "nld",
-            "rum" => "ron", "slo" => "slk", "mac" => "mkd",
-            "alb" => "sqi", "bur" => "mya", "per" => "fas",
-            "baq" => "eus", "wel" => "cym", "ice" => "isl",
-            "geo" => "kat", "may" => "msa", "scr" => "hrv",
-            "scc" => "srp",
-            _ => return None,
-        };
-        return Language::from_639_3(t_code)
+        return Language::from_639_3(code_lower)
             .and_then(|l| l.to_639_1())
             .map(str::to_string);
     }
