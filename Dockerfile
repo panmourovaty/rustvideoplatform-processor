@@ -42,7 +42,7 @@ WORKDIR /app
 COPY --from=builder /rustvideoplatform-processor /opt/rustvideoplatform-processor
 
 ARG TARGETARCH
-RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium libgcc blender; \
+RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium libgcc blender py3-numpy; \
     case "$TARGETARCH" in \
         amd64) apk add --no-cache intel-media-driver onevpl-intel-gpu ;; \
     esac; \
