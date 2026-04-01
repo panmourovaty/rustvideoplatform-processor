@@ -830,6 +830,16 @@ async fn process(db: db::ScyllaDb, config: Config) {
         };
 
         for (concept_id, concept_type) in unprocessed_concepts {
+            // Retexture jobs operate on already-processed source files, not upload files
+            if concept_type == "object_3d_retexture" {
+                println!("processing retexture job for medium: {}", concept_id);
+                let result = process_object_3d_retexture(concept_id.clone(), &db, &config.source_path).await;
+                if let Err(e) = result {
+                    eprintln!("Error processing retexture for {}: {}", concept_id, e);
+                }
+                continue;
+            }
+
             let input_file = format!("{}/{}", config.upload_path, concept_id);
 
             // Check that the upload file actually exists before attempting processing
@@ -1291,6 +1301,167 @@ async fn process_object_3d(concept_id: String, db: &db::ScyllaDb, upload_path: &
     let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
     let _ = fs::remove_file(&input_file);
 
+    Ok(())
+}
+
+/// Blender Python script: embed uploaded textures into an existing GLB.
+/// Textures are matched to PBR slots by filename keywords
+/// (albedo/diffuse/color → Base Color, normal → Normal map, roughness, metallic, ao, emission).
+const BLENDER_EMBED_TEXTURES_SCRIPT: &str = r#"
+import bpy, sys, os
+
+argv = sys.argv
+try:
+    sep = argv.index("--")
+    args = argv[sep + 1:]
+except ValueError:
+    print("Usage: blender --background --python script.py -- <model.glb> <textures_dir>", file=sys.stderr)
+    sys.exit(1)
+
+model_path = args[0]
+textures_dir = args[1]
+
+IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga'}
+
+texture_files = [
+    f for f in os.listdir(textures_dir)
+    if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+]
+
+if not texture_files:
+    print("No texture files found in textures directory", file=sys.stderr)
+    sys.exit(1)
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+
+try:
+    bpy.ops.import_scene.gltf(filepath=model_path)
+except Exception as e:
+    print(f"Failed to import GLB: {e}", file=sys.stderr)
+    sys.exit(1)
+
+SOCKET_HINTS = {
+    'basecolor': 'Base Color', 'base_color': 'Base Color', 'albedo': 'Base Color',
+    'diffuse': 'Base Color', 'color': 'Base Color', 'col': 'Base Color',
+    'normal': 'Normal', 'norm': 'Normal', 'nrm': 'Normal', 'nrml': 'Normal',
+    'roughness': 'Roughness', 'rough': 'Roughness', 'rgh': 'Roughness',
+    'metallic': 'Metallic', 'metal': 'Metallic', 'met': 'Metallic',
+    'ao': 'Ambient Occlusion', 'occlusion': 'Ambient Occlusion',
+    'emission': 'Emission Color', 'emissive': 'Emission Color', 'emit': 'Emission Color',
+}
+
+def get_socket_hint(stem):
+    stem_lower = stem.lower()
+    for key, socket in SOCKET_HINTS.items():
+        if key in stem_lower:
+            return socket
+    return None
+
+def ensure_bsdf(mat):
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    bsdf = nodes.get('Principled BSDF')
+    if bsdf is None:
+        for n in nodes:
+            if n.type == 'BSDF_PRINCIPLED':
+                bsdf = n
+                break
+    if bsdf is None:
+        bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+    return mat.node_tree, bsdf
+
+def add_texture_node(mat, img, socket_name, is_non_color=False):
+    tree, bsdf = ensure_bsdf(mat)
+    nodes = tree.nodes
+    links = tree.links
+    tex_node = nodes.new('ShaderNodeTexImage')
+    tex_node.image = img
+    if is_non_color:
+        tex_node.image.colorspace_settings.name = 'Non-Color'
+    if socket_name == 'Normal':
+        norm_node = nodes.new('ShaderNodeNormalMap')
+        links.new(tex_node.outputs['Color'], norm_node.inputs['Color'])
+        links.new(norm_node.outputs['Normal'], bsdf.inputs['Normal'])
+    elif socket_name in bsdf.inputs:
+        links.new(tex_node.outputs['Color'], bsdf.inputs[socket_name])
+
+all_materials = [m for m in bpy.data.materials if m and not m.name.startswith('.')]
+
+for tex_file in texture_files:
+    tex_path = os.path.join(textures_dir, tex_file)
+    stem = os.path.splitext(tex_file)[0]
+    socket_name = get_socket_hint(stem) or 'Base Color'
+    is_non_color = socket_name in ('Normal', 'Roughness', 'Metallic', 'Ambient Occlusion')
+    img = bpy.data.images.load(tex_path)
+
+    applied = False
+    for mat in all_materials:
+        mat.use_nodes = True
+        _, bsdf = ensure_bsdf(mat)
+        sock = bsdf.inputs.get(socket_name)
+        if sock is not None and not sock.is_linked:
+            add_texture_node(mat, img, socket_name, is_non_color)
+            applied = True
+            print(f"Applied {tex_file} -> {socket_name} on '{mat.name}'")
+
+    if not applied:
+        for mat in all_materials:
+            mat.use_nodes = True
+            add_texture_node(mat, img, socket_name, is_non_color)
+            print(f"Force-applied {tex_file} -> {socket_name} on '{mat.name}'")
+            break
+
+try:
+    bpy.ops.export_scene.gltf(filepath=model_path, export_format='GLB')
+    print(f"Exported GLB with embedded textures to {model_path}")
+except Exception as e:
+    print(f"Export failed: {e}", file=sys.stderr)
+    sys.exit(1)
+"#;
+
+async fn process_object_3d_retexture(medium_id: String, db: &db::ScyllaDb, source_path: &str) -> Result<(), String> {
+    let source_dir = format!("{}/{}", source_path, medium_id);
+    let glb_path = format!("{}/model.glb", source_dir);
+    let textures_dir = format!("{}/textures", source_dir);
+
+    if !std::path::Path::new(&glb_path).exists() {
+        let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&medium_id,)).await;
+        return Err(format!("model.glb not found at {}", glb_path));
+    }
+
+    if !std::path::Path::new(&textures_dir).exists() {
+        let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&medium_id,)).await;
+        return Err(format!("textures directory not found at {}", textures_dir));
+    }
+
+    let script_path = format!("{}/.tmp_embed_textures.py", source_dir);
+    fs::write(&script_path, BLENDER_EMBED_TEXTURES_SCRIPT)
+        .map_err(|e| format!("Failed to write Blender script: {}", e))?;
+
+    let script_path_c = script_path.clone();
+    let glb_path_c = glb_path.clone();
+    let textures_dir_c = textures_dir.clone();
+
+    let result = task::spawn_blocking(move || {
+        let cmd = format!(
+            "blender --background --python '{}' -- '{}' '{}'",
+            script_path_c, glb_path_c, textures_dir_c
+        );
+        println!("Embedding textures into GLB: {}", cmd);
+        Command::new("sh").arg("-c").arg(&cmd).status()
+    }).await
+    .map_err(|e| format!("Blender task panicked: {}", e))?
+    .map_err(|e| format!("Failed to spawn blender: {}", e))?;
+
+    let _ = fs::remove_file(&script_path);
+
+    if !result.success() {
+        let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&medium_id,)).await;
+        return Err(format!("Blender exited with code {:?}", result.code()));
+    }
+
+    println!("Retexture complete for medium: {}", medium_id);
+    let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&medium_id,)).await;
     Ok(())
 }
 
