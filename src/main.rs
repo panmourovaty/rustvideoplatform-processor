@@ -1043,7 +1043,15 @@ try:
         except Exception:
             bpy.ops.import_scene.obj(filepath=input_path)
     elif ext == '.fbx':
-        bpy.ops.import_scene.fbx(filepath=input_path)
+        try:
+            # Blender 5.0 requires directory + files to avoid 'no attribute files' crash
+            bpy.ops.import_scene.fbx(
+                filepath=input_path,
+                directory=os.path.dirname(os.path.abspath(input_path)),
+                files=[{"name": os.path.basename(input_path)}]
+            )
+        except Exception:
+            bpy.ops.import_scene.fbx(filepath=input_path)
     elif ext == '.stl':
         try:
             bpy.ops.wm.stl_import(filepath=input_path)
