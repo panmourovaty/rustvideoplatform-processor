@@ -531,6 +531,14 @@ async fn main() {
 }
 
 fn detect_file_type(input_file: &str) -> Option<String> {
+    // Check for GLB magic bytes ("glTF")
+    if let Ok(mut file) = std::fs::File::open(input_file) {
+        let mut magic = [0u8; 4];
+        if std::io::Read::read_exact(&mut file, &mut magic).is_ok() && &magic == b"glTF" {
+            return Some("object_3d".to_string());
+        }
+    }
+
     // Check for PDF magic bytes (%PDF)
     #[cfg(feature = "pdf")]
     if let Ok(mut file) = std::fs::File::open(input_file) {
@@ -887,6 +895,11 @@ async fn process(db: db::ScyllaDb, config: Config) {
                     eprintln!("PDF processing not available (built without pdf feature) for concept {}, skipping", concept_id);
                     Ok(())
                 }
+            } else if actual_type == "object_3d" {
+                println!("processing concept: {} as object_3d", concept_id);
+                process_object_3d(concept_id.clone(), &db, &config.upload_path)
+                    .await
+                    .map_err(|e| format!("object_3d processing failed: {}", e))
             } else if actual_type == "vtt_translate" {
                 println!("processing concept: {} as vtt_translate", concept_id);
                 process_vtt_translate(concept_id.clone(), &db, &config.translation, &config.upload_path, &config.source_path)
@@ -991,6 +1004,294 @@ async fn process_video(concept_id: String, db: &db::ScyllaDb, config: &Config) -
         }
         Err(e) => Err(format!("Video transcode failed: {}", e)),
     }
+}
+
+/// Blender Python script: convert any supported 3D format to GLB
+const BLENDER_CONVERT_SCRIPT: &str = r#"
+import bpy, sys, os
+
+argv = sys.argv
+try:
+    sep = argv.index("--")
+    args = argv[sep + 1:]
+except ValueError:
+    print("Usage: blender --background --python script.py -- <input> <output>", file=sys.stderr)
+    sys.exit(1)
+
+input_path = args[0]
+output_path = args[1]
+ext = os.path.splitext(input_path)[1].lower()
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+
+try:
+    if ext in ('.glb', '.gltf'):
+        bpy.ops.import_scene.gltf(filepath=input_path)
+    elif ext == '.obj':
+        try:
+            bpy.ops.wm.obj_import(filepath=input_path)
+        except Exception:
+            bpy.ops.import_scene.obj(filepath=input_path)
+    elif ext == '.fbx':
+        bpy.ops.import_scene.fbx(filepath=input_path)
+    elif ext == '.stl':
+        try:
+            bpy.ops.wm.stl_import(filepath=input_path)
+        except Exception:
+            bpy.ops.import_mesh.stl(filepath=input_path)
+    elif ext == '.ply':
+        try:
+            bpy.ops.wm.ply_import(filepath=input_path)
+        except Exception:
+            bpy.ops.import_mesh.ply(filepath=input_path)
+    elif ext == '.dae':
+        bpy.ops.wm.collada_import(filepath=input_path)
+    elif ext in ('.usd', '.usda', '.usdc', '.usdz'):
+        bpy.ops.wm.usd_import(filepath=input_path)
+    elif ext == '.blend':
+        bpy.ops.wm.open_mainfile(filepath=input_path)
+    else:
+        print(f"Unsupported 3D format: {ext}", file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print(f"Import failed: {e}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB')
+    print(f"Exported GLB to {output_path}")
+except Exception as e:
+    print(f"Export failed: {e}", file=sys.stderr)
+    sys.exit(1)
+"#;
+
+/// Blender Python script: render a thumbnail from a GLB file
+const BLENDER_THUMBNAIL_SCRIPT: &str = r#"
+import bpy, sys, math
+
+argv = sys.argv
+try:
+    sep = argv.index("--")
+    args = argv[sep + 1:]
+except ValueError:
+    print("Usage: blender --background --python script.py -- <input.glb> <output.png>", file=sys.stderr)
+    sys.exit(1)
+
+input_path = args[0]
+output_path = args[1]
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+
+try:
+    bpy.ops.import_scene.gltf(filepath=input_path)
+except Exception as e:
+    print(f"Import failed: {e}", file=sys.stderr)
+    sys.exit(1)
+
+import mathutils
+
+mesh_objects = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+if not mesh_objects:
+    print("No mesh objects found in scene", file=sys.stderr)
+    sys.exit(1)
+
+min_co = [1e30, 1e30, 1e30]
+max_co = [-1e30, -1e30, -1e30]
+for obj in mesh_objects:
+    for corner in obj.bound_box:
+        wc = obj.matrix_world @ mathutils.Vector(corner)
+        for i in range(3):
+            if wc[i] < min_co[i]:
+                min_co[i] = wc[i]
+            if wc[i] > max_co[i]:
+                max_co[i] = wc[i]
+
+center = mathutils.Vector([(min_co[i] + max_co[i]) / 2.0 for i in range(3)])
+size = max(max_co[i] - min_co[i] for i in range(3))
+if size < 1e-6:
+    size = 1.0
+dist = size * 2.5
+
+cam_pos = center + mathutils.Vector([dist * 0.7, -dist * 0.7, dist * 0.45])
+bpy.ops.object.camera_add(location=cam_pos)
+cam_obj = bpy.context.active_object
+direction = center - mathutils.Vector(cam_pos)
+rot = direction.to_track_quat('-Z', 'Y')
+cam_obj.rotation_euler = rot.to_euler()
+bpy.context.scene.camera = cam_obj
+
+bpy.ops.object.light_add(type='SUN', location=cam_pos + mathutils.Vector([0.0, 0.0, size]))
+sun1 = bpy.context.active_object
+sun1.data.energy = 4.0
+bpy.ops.object.light_add(type='SUN', location=cam_pos - mathutils.Vector([size, size, 0.0]))
+sun2 = bpy.context.active_object
+sun2.data.energy = 1.5
+
+scene = bpy.context.scene
+scene.render.engine = 'CYCLES'
+scene.cycles.device = 'CPU'
+scene.cycles.samples = 32
+scene.cycles.use_denoising = True
+scene.render.resolution_x = 1280
+scene.render.resolution_y = 720
+scene.render.image_settings.file_format = 'PNG'
+scene.render.filepath = output_path
+
+try:
+    bpy.ops.render.render(write_still=True)
+    print(f"Thumbnail rendered to {output_path}")
+except Exception as e:
+    print(f"Render failed: {e}", file=sys.stderr)
+    sys.exit(1)
+"#;
+
+async fn process_object_3d(concept_id: String, db: &db::ScyllaDb, upload_path: &str) -> Result<(), String> {
+    let output_dir = format!("{}/{}_processing", upload_path, concept_id);
+    fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Failed to create processing directory: {}", e))?;
+
+    let input_file = format!("{}/{}", upload_path, concept_id);
+
+    // Get original filename from DB to determine extension
+    let concept_info = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
+        .await
+        .ok()
+        .and_then(|r| r.into_rows_result().ok())
+        .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten());
+
+    let concept_name = concept_info.as_ref()
+        .map(|(_, name, _, _, _)| name.clone())
+        .unwrap_or_default();
+
+    let original_ext = std::path::Path::new(&concept_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("glb")
+        .to_lowercase();
+
+    // Copy original file for download
+    let original_dest = format!("{}/model.{}", output_dir, original_ext);
+    fs::copy(&input_file, &original_dest)
+        .map_err(|e| format!("Failed to copy original file: {}", e))?;
+
+    // Save the original extension so the web app can construct the download link
+    fs::write(format!("{}/original_ext.txt", output_dir), &original_ext)
+        .map_err(|e| format!("Failed to write original_ext.txt: {}", e))?;
+
+    let glb_path = format!("{}/model.glb", output_dir);
+
+    // Convert to GLB using Blender (skip if already GLB)
+    if original_ext != "glb" {
+        let convert_script_path = format!("{}/convert_to_glb.py", output_dir);
+        fs::write(&convert_script_path, BLENDER_CONVERT_SCRIPT)
+            .map_err(|e| format!("Failed to write conversion script: {}", e))?;
+
+        let original_dest_c = original_dest.clone();
+        let glb_path_c = glb_path.clone();
+        let script_path_c = convert_script_path.clone();
+
+        let convert_result = task::spawn_blocking(move || {
+            let cmd = format!(
+                "blender --background --python '{}' -- '{}' '{}'",
+                script_path_c, original_dest_c, glb_path_c
+            );
+            println!("Converting 3D model to GLB: {}", cmd);
+            Command::new("sh").arg("-c").arg(&cmd).status()
+        }).await
+        .map_err(|e| format!("Conversion task panicked: {}", e))?
+        .map_err(|e| format!("Failed to spawn blender: {}", e))?;
+
+        let _ = fs::remove_file(&convert_script_path);
+
+        if !convert_result.success() {
+            return Err(format!("Blender GLB conversion failed with exit code: {:?}", convert_result.code()));
+        }
+        println!("GLB conversion complete: {}", glb_path);
+    } else {
+        // Already GLB - the original_dest IS the glb_path, just symlink or copy
+        // Since we already copied to model.glb (same as original_dest when ext=glb), nothing to do
+        println!("Input is already GLB, skipping conversion");
+    }
+
+    // Render thumbnail using Blender
+    let thumbnail_png = format!("{}/thumbnail_raw.png", output_dir);
+    let render_script_path = format!("{}/render_thumbnail.py", output_dir);
+    fs::write(&render_script_path, BLENDER_THUMBNAIL_SCRIPT)
+        .map_err(|e| format!("Failed to write thumbnail script: {}", e))?;
+
+    let glb_path_t = glb_path.clone();
+    let thumbnail_png_t = thumbnail_png.clone();
+    let script_path_t = render_script_path.clone();
+
+    let render_result = task::spawn_blocking(move || {
+        let cmd = format!(
+            "blender --background --python '{}' -- '{}' '{}'",
+            script_path_t, glb_path_t, thumbnail_png_t
+        );
+        println!("Rendering 3D thumbnail: {}", cmd);
+        Command::new("sh").arg("-c").arg(&cmd).status()
+    }).await
+    .map_err(|e| format!("Thumbnail render task panicked: {}", e))?;
+
+    let _ = fs::remove_file(&render_script_path);
+
+    match render_result {
+        Ok(status) if status.success() => {
+            println!("Thumbnail rendering complete");
+        }
+        Ok(status) => {
+            eprintln!("Warning: Blender thumbnail render failed with exit code: {:?}", status.code());
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to spawn blender for thumbnail: {}", e);
+        }
+    }
+
+    // Convert PNG thumbnail to AVIF, JPG, and small AVIF using ffmpeg
+    if std::path::Path::new(&thumbnail_png).exists() {
+        let output_dir_t = output_dir.clone();
+        let thumbnail_png_ff = thumbnail_png.clone();
+        task::spawn_blocking(move || {
+            let avif_cmd = format!(
+                "ffmpeg -nostdin -y -i '{}' -vf 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf 28 -frames:v 1 '{}/thumbnail.avif'",
+                thumbnail_png_ff, output_dir_t
+            );
+            let jpg_cmd = format!(
+                "ffmpeg -nostdin -y -i '{}' -vf 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black' -frames:v 1 -update 1 -q:v 25 '{}/thumbnail.jpg'",
+                thumbnail_png_ff, output_dir_t
+            );
+            let sm_avif_cmd = format!(
+                "ffmpeg -nostdin -y -i '{}' -vf 'scale=352:198:force_original_aspect_ratio=decrease,pad=352:198:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p' -c:v libsvtav1 -svtav1-params avif=1 -crf 28 -frames:v 1 '{}/thumbnail-sm.avif'",
+                thumbnail_png_ff, output_dir_t
+            );
+            println!("Executing: {}", avif_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&avif_cmd).status();
+            println!("Executing: {}", jpg_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&jpg_cmd).status();
+            println!("Executing: {}", sm_avif_cmd);
+            let _ = Command::new("sh").arg("-c").arg(&sm_avif_cmd).status();
+        }).await.ok();
+        let _ = fs::remove_file(&thumbnail_png);
+    } else {
+        eprintln!("Warning: Thumbnail PNG not found, skipping thumbnail conversion");
+    }
+
+    // Get owner and mark concept as processed
+    let owner = db.session.execute_unpaged(&db.get_concept, (&concept_id,))
+        .await
+        .ok()
+        .and_then(|r| r.into_rows_result().ok())
+        .and_then(|rows| rows.maybe_first_row::<(String, String, String, String, bool)>().ok().flatten())
+        .map(|(_, _, owner, _, _)| owner);
+
+    let _ = db.session.execute_unpaged(&db.mark_concept_processed, (&concept_id,)).await;
+    if let Some(ref owner) = owner {
+        let _ = db.session.execute_unpaged(&db.mark_concept_processed_by_owner, (owner, &concept_id)).await;
+    }
+    let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
+    let _ = fs::remove_file(&input_file);
+
+    Ok(())
 }
 
 async fn process_vtt_translate(concept_id: String, db: &db::ScyllaDb, translation_config: &TranslationConfig, upload_path: &str, source_path: &str) -> Result<(), String> {
