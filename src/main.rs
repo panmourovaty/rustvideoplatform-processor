@@ -1108,14 +1108,17 @@ if bg_node is None:
 bg_node.inputs["Color"].default_value = (0.08, 0.08, 0.10, 1.0)  # dark neutral
 bg_node.inputs["Strength"].default_value = 1.0
 
-# Sky texture for soft IBL fill
+# Sky texture for soft IBL fill — try sky types in preference order
+# (NISHITA was removed in Blender 5.0; HOSEK_WILKIE is the best fallback)
 sky = world.node_tree.nodes.new("ShaderNodeTexSky")
-sky.sky_type = 'NISHITA'
+for sky_type in ('NISHITA', 'HOSEK_WILKIE', 'PREETHAM'):
+    try:
+        sky.sky_type = sky_type
+        break
+    except TypeError:
+        pass
 sky.sun_elevation = math.radians(45)
 sky.sun_rotation = math.radians(30)
-sky.altitude = 0
-sky.air_density = 1.0
-sky.dust_density = 0.5
 world.node_tree.links.new(sky.outputs["Color"], bg_node.inputs["Color"])
 
 # ── Bounding box ─────────────────────────────────────────────────────────────
