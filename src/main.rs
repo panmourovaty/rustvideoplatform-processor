@@ -1043,14 +1043,17 @@ try:
         except Exception:
             bpy.ops.import_scene.obj(filepath=input_path)
     elif ext == '.fbx':
+        # Blender 5.0 bug: IMPORT_SCENE_OT_fbx.execute() references self.files
+        # which is never registered as an RNA property, causing AttributeError.
+        # Bypass the broken operator and call the import module's load() directly.
+        # The bug only exists in the operator wrapper, not in the underlying loader.
         try:
-            # Blender 5.0 requires directory + files to avoid 'no attribute files' crash
-            bpy.ops.import_scene.fbx(
-                filepath=input_path,
-                directory=os.path.dirname(os.path.abspath(input_path)),
-                files=[{"name": os.path.basename(input_path)}]
-            )
-        except Exception:
+            from io_scene_fbx import import_fbx as _fbx_mod
+            class _Op:
+                def report(self, level, msg): print(f"FBX: {msg}")
+            _fbx_mod.load(_Op(), bpy.context, filepath=input_path)
+        except ImportError:
+            # Older Blender without importable addons_core — operator works fine there
             bpy.ops.import_scene.fbx(filepath=input_path)
     elif ext == '.stl':
         try:
