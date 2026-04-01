@@ -1077,7 +1077,7 @@ except Exception as e:
 
 /// Blender Python script: render a thumbnail from a GLB file
 const BLENDER_THUMBNAIL_SCRIPT: &str = r#"
-import bpy, sys, math
+import bpy, sys, math, mathutils
 
 argv = sys.argv
 try:
@@ -1098,54 +1098,106 @@ except Exception as e:
     print(f"Import failed: {e}", file=sys.stderr)
     sys.exit(1)
 
-import mathutils
+# ── World / ambient ──────────────────────────────────────────────────────────
+world = bpy.data.worlds.new("ThumbnailWorld")
+bpy.context.scene.world = world
+world.use_nodes = True
+bg_node = world.node_tree.nodes.get("Background")
+if bg_node is None:
+    bg_node = world.node_tree.nodes.new("ShaderNodeBackground")
+bg_node.inputs["Color"].default_value = (0.08, 0.08, 0.10, 1.0)  # dark neutral
+bg_node.inputs["Strength"].default_value = 1.0
 
+# Sky texture for soft IBL fill
+sky = world.node_tree.nodes.new("ShaderNodeTexSky")
+sky.sky_type = 'NISHITA'
+sky.sun_elevation = math.radians(45)
+sky.sun_rotation = math.radians(30)
+sky.altitude = 0
+sky.air_density = 1.0
+sky.dust_density = 0.5
+world.node_tree.links.new(sky.outputs["Color"], bg_node.inputs["Color"])
+
+# ── Bounding box ─────────────────────────────────────────────────────────────
 mesh_objects = [o for o in bpy.context.scene.objects if o.type == 'MESH']
-if not mesh_objects:
-    print("No mesh objects found in scene", file=sys.stderr)
+all_objects  = [o for o in bpy.context.scene.objects if o.type in ('MESH','CURVE','SURFACE','META','FONT','ARMATURE','LATTICE','EMPTY')]
+target_objects = mesh_objects if mesh_objects else all_objects
+
+if not target_objects:
+    print("No renderable objects found in scene", file=sys.stderr)
     sys.exit(1)
 
-min_co = [1e30, 1e30, 1e30]
-max_co = [-1e30, -1e30, -1e30]
-for obj in mesh_objects:
+min_co = mathutils.Vector([1e30, 1e30, 1e30])
+max_co = mathutils.Vector([-1e30, -1e30, -1e30])
+for obj in target_objects:
     for corner in obj.bound_box:
         wc = obj.matrix_world @ mathutils.Vector(corner)
         for i in range(3):
-            if wc[i] < min_co[i]:
-                min_co[i] = wc[i]
-            if wc[i] > max_co[i]:
-                max_co[i] = wc[i]
+            if wc[i] < min_co[i]: min_co[i] = wc[i]
+            if wc[i] > max_co[i]: max_co[i] = wc[i]
 
-center = mathutils.Vector([(min_co[i] + max_co[i]) / 2.0 for i in range(3)])
-size = max(max_co[i] - min_co[i] for i in range(3))
+center = (min_co + max_co) / 2.0
+size   = max(max_co[i] - min_co[i] for i in range(3))
 if size < 1e-6:
     size = 1.0
-dist = size * 2.5
+dist = size * 2.2
 
-cam_pos = center + mathutils.Vector([dist * 0.7, -dist * 0.7, dist * 0.45])
+# ── Camera ───────────────────────────────────────────────────────────────────
+cam_offset = mathutils.Vector([dist * 0.65, -dist * 0.65, dist * 0.4])
+cam_pos    = center + cam_offset
+
 bpy.ops.object.camera_add(location=cam_pos)
 cam_obj = bpy.context.active_object
-direction = center - mathutils.Vector(cam_pos)
+cam_obj.data.lens = 50
+direction = center - cam_pos
 rot = direction.to_track_quat('-Z', 'Y')
 cam_obj.rotation_euler = rot.to_euler()
 bpy.context.scene.camera = cam_obj
 
-bpy.ops.object.light_add(type='SUN', location=cam_pos + mathutils.Vector([0.0, 0.0, size]))
-sun1 = bpy.context.active_object
-sun1.data.energy = 4.0
-bpy.ops.object.light_add(type='SUN', location=cam_pos - mathutils.Vector([size, size, 0.0]))
-sun2 = bpy.context.active_object
-sun2.data.energy = 1.5
+# ── Lights ───────────────────────────────────────────────────────────────────
+# Key light (warm, upper-front-right)
+bpy.ops.object.light_add(type='SUN', location=center + mathutils.Vector([size * 1.5, -size * 0.5, size * 1.5]))
+key = bpy.context.active_object
+key.data.energy = 5.0
+key.data.color  = (1.0, 0.95, 0.88)
+key.data.angle  = math.radians(5)
 
+# Fill light (cool, left)
+bpy.ops.object.light_add(type='AREA', location=center + mathutils.Vector([-size * 2.0, size * 0.5, size * 0.8]))
+fill = bpy.context.active_object
+fill.data.energy = 200.0 * size * size
+fill.data.color  = (0.7, 0.8, 1.0)
+fill.data.size   = size * 2.0
+fill_dir = center - fill.location
+fill.rotation_euler = fill_dir.to_track_quat('-Z', 'Y').to_euler()
+
+# Rim / back light
+bpy.ops.object.light_add(type='SUN', location=center + mathutils.Vector([0.0, size * 2.0, size * 1.0]))
+rim = bpy.context.active_object
+rim.data.energy = 1.5
+rim.data.color  = (0.9, 0.95, 1.0)
+
+# ── Render settings (EEVEE – fast, correct PBR) ───────────────────────────
 scene = bpy.context.scene
-scene.render.engine = 'CYCLES'
-scene.cycles.device = 'CPU'
-scene.cycles.samples = 32
-scene.cycles.use_denoising = True
-scene.render.resolution_x = 1280
-scene.render.resolution_y = 720
+try:
+    scene.render.engine = 'BLENDER_EEVEE_NEXT'
+except:
+    scene.render.engine = 'BLENDER_EEVEE'
+
+scene.eevee.use_gtao            = True   # ambient occlusion
+scene.eevee.use_bloom           = False
+scene.eevee.taa_render_samples  = 64
+
+# Filmic tone mapping for natural, non-washed-out colours
+scene.view_settings.view_transform = 'Filmic'
+scene.view_settings.look           = 'Medium Contrast'
+scene.view_settings.exposure       = 0.0
+scene.view_settings.gamma          = 1.0
+
+scene.render.resolution_x             = 1280
+scene.render.resolution_y             = 720
 scene.render.image_settings.file_format = 'PNG'
-scene.render.filepath = output_path
+scene.render.filepath                  = output_path
 
 try:
     bpy.ops.render.render(write_still=True)
