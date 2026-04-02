@@ -42,7 +42,21 @@ WORKDIR /app
 COPY --from=builder /rustvideoplatform-processor /opt/rustvideoplatform-processor
 
 ARG TARGETARCH
-RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium libgcc blender py3-numpy; \
+RUN apk add --no-cache \
+        ffmpeg libva libva-utils libgcc blender py3-numpy \
+        # Mesa OpenGL (libGL.so.1 / libOpenGL.so.0) — needed by EEVEE classic fallback
+        mesa-gl \
+        # Mesa Gallium DRI/VA drivers (video + raster)
+        mesa-dri-gallium mesa-va-gallium \
+        # Vulkan stack — EEVEE Next uses Vulkan for headless rendering
+        vulkan-loader \
+        mesa-vulkan-intel \   # Intel ANV (Gen9+)
+        mesa-vulkan-ati \     # AMD RADV
+        mesa-vulkan-swrast \  # Lavapipe: pure-CPU Vulkan, always available as fallback
+        ; \
+    # NVIDIA: proprietary drivers must be supplied by the host via the
+    # NVIDIA Container Toolkit (--gpus flag / nvidia-container-runtime).
+    # No additional packages required inside the image.
     case "$TARGETARCH" in \
         amd64) apk add --no-cache intel-media-driver onevpl-intel-gpu ;; \
     esac; \

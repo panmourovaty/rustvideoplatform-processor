@@ -1192,13 +1192,13 @@ rim.data.energy = 1.5
 rim.data.color  = (0.9, 0.95, 1.0)
 
 # ── Render settings ──────────────────────────────────────────────────────────
-# Use Cycles with CPU rendering: EEVEE/EEVEE-Next require OpenGL which is not
-# available in a headless Docker container without a GPU/display.
-# Cycles renders entirely on CPU with no graphics library dependencies.
+# EEVEE Next (Vulkan) — launched with --gpu-backend vulkan so Blender uses the
+# Mesa Vulkan stack (ANV/RADV/Lavapipe) rather than OpenGL.
 scene = bpy.context.scene
-scene.render.engine = 'CYCLES'
-scene.cycles.device = 'CPU'
-scene.cycles.samples = 64
+try:
+    scene.render.engine = 'BLENDER_EEVEE_NEXT'
+except Exception:
+    scene.render.engine = 'BLENDER_EEVEE'
 
 # Tone mapping: prefer Filmic, fall back to AgX (Blender 5.0 default)
 for _transform, _look in [('Filmic', 'Medium Contrast'), ('AgX', 'None')]:
@@ -1304,7 +1304,7 @@ async fn process_object_3d(concept_id: String, db: &db::ScyllaDb, upload_path: &
 
     let render_result = task::spawn_blocking(move || {
         let cmd = format!(
-            "blender --background --python '{}' -- '{}' '{}'",
+            "blender --background --gpu-backend vulkan --python '{}' -- '{}' '{}'",
             script_path_t, glb_path_t, thumbnail_png_t
         );
         println!("Rendering 3D thumbnail: {}", cmd);
