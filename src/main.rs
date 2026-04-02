@@ -1191,24 +1191,14 @@ rim = bpy.context.active_object
 rim.data.energy = 1.5
 rim.data.color  = (0.9, 0.95, 1.0)
 
-# ── Render settings (EEVEE – fast, correct PBR) ───────────────────────────
+# ── Render settings ──────────────────────────────────────────────────────────
+# Use Cycles with CPU rendering: EEVEE/EEVEE-Next require OpenGL which is not
+# available in a headless Docker container without a GPU/display.
+# Cycles renders entirely on CPU with no graphics library dependencies.
 scene = bpy.context.scene
-try:
-    scene.render.engine = 'BLENDER_EEVEE_NEXT'
-except:
-    scene.render.engine = 'BLENDER_EEVEE'
-
-# EEVEE settings vary between classic EEVEE (<=4.1) and EEVEE Next (>=4.2/5.0)
-# Wrap each in try/except so removed properties don't crash the script
-for _attr, _val in [
-    ('use_gtao', True),         # AO – classic EEVEE only; Next uses ray-tracing
-    ('use_bloom', False),       # Bloom – classic only; moved to compositor in Next
-    ('taa_render_samples', 64), # Sample count – present in both
-]:
-    try:
-        setattr(scene.eevee, _attr, _val)
-    except AttributeError:
-        pass
+scene.render.engine = 'CYCLES'
+scene.cycles.device = 'CPU'
+scene.cycles.samples = 64
 
 # Tone mapping: prefer Filmic, fall back to AgX (Blender 5.0 default)
 for _transform, _look in [('Filmic', 'Medium Contrast'), ('AgX', 'None')]:
