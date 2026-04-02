@@ -1198,15 +1198,28 @@ try:
 except:
     scene.render.engine = 'BLENDER_EEVEE'
 
-scene.eevee.use_gtao            = True   # ambient occlusion
-scene.eevee.use_bloom           = False
-scene.eevee.taa_render_samples  = 64
+# EEVEE settings vary between classic EEVEE (<=4.1) and EEVEE Next (>=4.2/5.0)
+# Wrap each in try/except so removed properties don't crash the script
+for _attr, _val in [
+    ('use_gtao', True),         # AO – classic EEVEE only; Next uses ray-tracing
+    ('use_bloom', False),       # Bloom – classic only; moved to compositor in Next
+    ('taa_render_samples', 64), # Sample count – present in both
+]:
+    try:
+        setattr(scene.eevee, _attr, _val)
+    except AttributeError:
+        pass
 
-# Filmic tone mapping for natural, non-washed-out colours
-scene.view_settings.view_transform = 'Filmic'
-scene.view_settings.look           = 'Medium Contrast'
-scene.view_settings.exposure       = 0.0
-scene.view_settings.gamma          = 1.0
+# Tone mapping: prefer Filmic, fall back to AgX (Blender 5.0 default)
+for _transform, _look in [('Filmic', 'Medium Contrast'), ('AgX', 'None')]:
+    try:
+        scene.view_settings.view_transform = _transform
+        scene.view_settings.look           = _look
+        break
+    except TypeError:
+        pass
+scene.view_settings.exposure = 0.0
+scene.view_settings.gamma    = 1.0
 
 scene.render.resolution_x             = 1280
 scene.render.resolution_y             = 720
