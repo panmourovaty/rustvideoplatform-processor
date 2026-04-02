@@ -1109,9 +1109,11 @@ except Exception as e:
     print(f"Import failed: {e}", file=sys.stderr)
     sys.exit(1)
 
+scene = bpy.context.scene
+
 # ── World / ambient ──────────────────────────────────────────────────────────
 world = bpy.data.worlds.new("ThumbnailWorld")
-bpy.context.scene.world = world
+scene.world = world
 world.use_nodes = True
 bg_node = world.node_tree.nodes.get("Background")
 if bg_node is None:
@@ -1238,7 +1240,6 @@ rim.data.color  = (0.9, 0.95, 1.0)
 # ── Render settings ──────────────────────────────────────────────────────────
 # EEVEE Next (Vulkan) — launched with --gpu-backend vulkan so Blender uses the
 # Mesa Vulkan stack (ANV/RADV/Lavapipe) rather than OpenGL.
-scene = bpy.context.scene
 try:
     scene.render.engine = 'BLENDER_EEVEE_NEXT'
 except Exception:
