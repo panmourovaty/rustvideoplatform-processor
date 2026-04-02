@@ -1154,15 +1154,59 @@ center = (min_co + max_co) / 2.0
 size   = max(max_co[i] - min_co[i] for i in range(3))
 if size < 1e-6:
     size = 1.0
-dist = size * 2.2
 
-# ── Camera ───────────────────────────────────────────────────────────────────
-cam_offset = mathutils.Vector([dist * 0.65, -dist * 0.65, dist * 0.4])
-cam_pos    = center + cam_offset
+# ── Camera: exact tight fit ──────────────────────────────────────────────────
+# Direction from scene center toward the camera (will be normalised).
+cam_dir = mathutils.Vector([0.65, -0.65, 0.4])
+cam_dir.normalize()
+
+focal_mm   = 50
+sensor_mm  = 36    # Blender default full-frame sensor width
+aspect     = scene.render.resolution_x / scene.render.resolution_y
+half_tan_x = (sensor_mm / 2) / focal_mm   # horizontal half-angle tangent
+half_tan_y = half_tan_x / aspect           # vertical   half-angle tangent
+
+# Build camera-space axes from the look direction
+forward  = -cam_dir
+world_up = mathutils.Vector([0.0, 0.0, 1.0])
+right = forward.cross(world_up)
+if right.length < 1e-6:
+    world_up = mathutils.Vector([0.0, 1.0, 0.0])
+    right = forward.cross(world_up)
+right.normalize()
+up = right.cross(forward)
+up.normalize()
+
+# All 8 AABB corners
+corners = [
+    mathutils.Vector((min_co.x + (max_co.x - min_co.x) * xi,
+                      min_co.y + (max_co.y - min_co.y) * yi,
+                      min_co.z + (max_co.z - min_co.z) * zi))
+    for xi in (0, 1) for yi in (0, 1) for zi in (0, 1)
+]
+
+# Minimum camera distance D along cam_dir so every corner fits the frustum.
+# For corner C: z_cam = D - dot(C-center, cam_dir)  (depth in front of camera)
+#               x_cam = dot(C-center, right)          (D-independent)
+#               y_cam = dot(C-center, up)             (D-independent)
+# Constraints: z_cam >= |x_cam|/half_tan_x  and  z_cam >= |y_cam|/half_tan_y
+# => D >= dot(C-center, cam_dir) + |x_cam|/half_tan_x
+#    D >= dot(C-center, cam_dir) + |y_cam|/half_tan_y
+D = 0.0
+for c in corners:
+    v = c - center
+    depth = v.dot(cam_dir)
+    D = max(D,
+            depth + abs(v.dot(right)) / half_tan_x,
+            depth + abs(v.dot(up))    / half_tan_y)
+
+D *= 1.08   # 8% padding so model doesn't touch frame edges
+
+cam_pos = center + cam_dir * D
 
 bpy.ops.object.camera_add(location=cam_pos)
 cam_obj = bpy.context.active_object
-cam_obj.data.lens = 50
+cam_obj.data.lens = focal_mm
 direction = center - cam_pos
 rot = direction.to_track_quat('-Z', 'Y')
 cam_obj.rotation_euler = rot.to_euler()
