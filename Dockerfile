@@ -42,7 +42,16 @@ WORKDIR /app
 COPY --from=builder /rustvideoplatform-processor /opt/rustvideoplatform-processor
 
 ARG TARGETARCH
-RUN apk add --no-cache ffmpeg libva libva-utils mesa-dri-gallium mesa-va-gallium libgcc blender py3-numpy; \
+# mesa-gl         – libGL.so.1 / libOpenGL.so.0 (EEVEE classic fallback)
+# mesa-dri/va     – Gallium DRI/VA drivers
+# vulkan-loader   – Vulkan ICD loader (libvulkan.so.1)
+# mesa-vulkan-*   – ANV (Intel), RADV (AMD), swrast/Lavapipe (CPU fallback)
+# NVIDIA: proprietary drivers supplied by host via NVIDIA Container Toolkit
+RUN apk add --no-cache \
+        ffmpeg libva libva-utils libgcc blender py3-numpy \
+        mesa-gl mesa-dri-gallium mesa-va-gallium \
+        vulkan-loader mesa-vulkan-intel mesa-vulkan-ati mesa-vulkan-swrast \
+        ; \
     case "$TARGETARCH" in \
         amd64) apk add --no-cache intel-media-driver onevpl-intel-gpu ;; \
     esac; \

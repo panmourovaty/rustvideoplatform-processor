@@ -830,6 +830,16 @@ async fn process(db: db::ScyllaDb, config: Config) {
         };
 
         for (concept_id, concept_type) in unprocessed_concepts {
+            // Retexture jobs operate on already-processed source files, not upload files
+            if concept_type == "object_3d_retexture" {
+                println!("processing retexture job for medium: {}", concept_id);
+                let result = process_object_3d_retexture(concept_id.clone(), &db, &config.source_path).await;
+                if let Err(e) = result {
+                    eprintln!("Error processing retexture for {}: {}", concept_id, e);
+                }
+                continue;
+            }
+
             let input_file = format!("{}/{}", config.upload_path, concept_id);
 
             // Check that the upload file actually exists before attempting processing
@@ -1033,7 +1043,18 @@ try:
         except Exception:
             bpy.ops.import_scene.obj(filepath=input_path)
     elif ext == '.fbx':
-        bpy.ops.import_scene.fbx(filepath=input_path)
+        # Blender 5.0 bug: IMPORT_SCENE_OT_fbx.execute() references self.files
+        # which is never registered as an RNA property, causing AttributeError.
+        # Bypass the broken operator and call the import module's load() directly.
+        # The bug only exists in the operator wrapper, not in the underlying loader.
+        try:
+            from io_scene_fbx import import_fbx as _fbx_mod
+            class _Op:
+                def report(self, level, msg): print(f"FBX: {msg}")
+            _fbx_mod.load(_Op(), bpy.context, filepath=input_path)
+        except ImportError:
+            # Older Blender without importable addons_core — operator works fine there
+            bpy.ops.import_scene.fbx(filepath=input_path)
     elif ext == '.stl':
         try:
             bpy.ops.wm.stl_import(filepath=input_path)
@@ -1067,7 +1088,7 @@ except Exception as e:
 
 /// Blender Python script: render a thumbnail from a GLB file
 const BLENDER_THUMBNAIL_SCRIPT: &str = r#"
-import bpy, sys, math
+import bpy, sys, math, mathutils
 
 argv = sys.argv
 try:
@@ -1088,54 +1109,157 @@ except Exception as e:
     print(f"Import failed: {e}", file=sys.stderr)
     sys.exit(1)
 
-import mathutils
+scene = bpy.context.scene
 
+# ── World / ambient ──────────────────────────────────────────────────────────
+world = bpy.data.worlds.new("ThumbnailWorld")
+scene.world = world
+world.use_nodes = True
+bg_node = world.node_tree.nodes.get("Background")
+if bg_node is None:
+    bg_node = world.node_tree.nodes.new("ShaderNodeBackground")
+bg_node.inputs["Color"].default_value = (0.08, 0.08, 0.10, 1.0)  # dark neutral
+bg_node.inputs["Strength"].default_value = 1.0
+
+# Sky texture for soft IBL fill — try sky types in preference order
+# (NISHITA was removed in Blender 5.0; HOSEK_WILKIE is the best fallback)
+sky = world.node_tree.nodes.new("ShaderNodeTexSky")
+for sky_type in ('NISHITA', 'HOSEK_WILKIE', 'PREETHAM'):
+    try:
+        sky.sky_type = sky_type
+        break
+    except TypeError:
+        pass
+sky.sun_elevation = math.radians(45)
+sky.sun_rotation = math.radians(30)
+world.node_tree.links.new(sky.outputs["Color"], bg_node.inputs["Color"])
+
+# ── Bounding box ─────────────────────────────────────────────────────────────
 mesh_objects = [o for o in bpy.context.scene.objects if o.type == 'MESH']
-if not mesh_objects:
-    print("No mesh objects found in scene", file=sys.stderr)
+all_objects  = [o for o in bpy.context.scene.objects if o.type in ('MESH','CURVE','SURFACE','META','FONT','ARMATURE','LATTICE','EMPTY')]
+target_objects = mesh_objects if mesh_objects else all_objects
+
+if not target_objects:
+    print("No renderable objects found in scene", file=sys.stderr)
     sys.exit(1)
 
-min_co = [1e30, 1e30, 1e30]
-max_co = [-1e30, -1e30, -1e30]
-for obj in mesh_objects:
+min_co = mathutils.Vector([1e30, 1e30, 1e30])
+max_co = mathutils.Vector([-1e30, -1e30, -1e30])
+for obj in target_objects:
     for corner in obj.bound_box:
         wc = obj.matrix_world @ mathutils.Vector(corner)
         for i in range(3):
-            if wc[i] < min_co[i]:
-                min_co[i] = wc[i]
-            if wc[i] > max_co[i]:
-                max_co[i] = wc[i]
+            if wc[i] < min_co[i]: min_co[i] = wc[i]
+            if wc[i] > max_co[i]: max_co[i] = wc[i]
 
-center = mathutils.Vector([(min_co[i] + max_co[i]) / 2.0 for i in range(3)])
-size = max(max_co[i] - min_co[i] for i in range(3))
+center = (min_co + max_co) / 2.0
+size   = max(max_co[i] - min_co[i] for i in range(3))
 if size < 1e-6:
     size = 1.0
-dist = size * 2.5
 
-cam_pos = center + mathutils.Vector([dist * 0.7, -dist * 0.7, dist * 0.45])
+# ── Camera: exact tight fit ──────────────────────────────────────────────────
+# Direction from scene center toward the camera (will be normalised).
+cam_dir = mathutils.Vector([0.65, -0.65, 0.4])
+cam_dir.normalize()
+
+focal_mm   = 50
+sensor_mm  = 36    # Blender default full-frame sensor width
+aspect     = scene.render.resolution_x / scene.render.resolution_y
+half_tan_x = (sensor_mm / 2) / focal_mm   # horizontal half-angle tangent
+half_tan_y = half_tan_x / aspect           # vertical   half-angle tangent
+
+# Build camera-space axes from the look direction
+forward  = -cam_dir
+world_up = mathutils.Vector([0.0, 0.0, 1.0])
+right = forward.cross(world_up)
+if right.length < 1e-6:
+    world_up = mathutils.Vector([0.0, 1.0, 0.0])
+    right = forward.cross(world_up)
+right.normalize()
+up = right.cross(forward)
+up.normalize()
+
+# All 8 AABB corners
+corners = [
+    mathutils.Vector((min_co.x + (max_co.x - min_co.x) * xi,
+                      min_co.y + (max_co.y - min_co.y) * yi,
+                      min_co.z + (max_co.z - min_co.z) * zi))
+    for xi in (0, 1) for yi in (0, 1) for zi in (0, 1)
+]
+
+# Minimum camera distance D along cam_dir so every corner fits the frustum.
+# For corner C: z_cam = D - dot(C-center, cam_dir)  (depth in front of camera)
+#               x_cam = dot(C-center, right)          (D-independent)
+#               y_cam = dot(C-center, up)             (D-independent)
+# Constraints: z_cam >= |x_cam|/half_tan_x  and  z_cam >= |y_cam|/half_tan_y
+# => D >= dot(C-center, cam_dir) + |x_cam|/half_tan_x
+#    D >= dot(C-center, cam_dir) + |y_cam|/half_tan_y
+D = 0.0
+for c in corners:
+    v = c - center
+    depth = v.dot(cam_dir)
+    D = max(D,
+            depth + abs(v.dot(right)) / half_tan_x,
+            depth + abs(v.dot(up))    / half_tan_y)
+
+D *= 1.08   # 8% padding so model doesn't touch frame edges
+
+cam_pos = center + cam_dir * D
+
 bpy.ops.object.camera_add(location=cam_pos)
 cam_obj = bpy.context.active_object
-direction = center - mathutils.Vector(cam_pos)
+cam_obj.data.lens = focal_mm
+direction = center - cam_pos
 rot = direction.to_track_quat('-Z', 'Y')
 cam_obj.rotation_euler = rot.to_euler()
 bpy.context.scene.camera = cam_obj
 
-bpy.ops.object.light_add(type='SUN', location=cam_pos + mathutils.Vector([0.0, 0.0, size]))
-sun1 = bpy.context.active_object
-sun1.data.energy = 4.0
-bpy.ops.object.light_add(type='SUN', location=cam_pos - mathutils.Vector([size, size, 0.0]))
-sun2 = bpy.context.active_object
-sun2.data.energy = 1.5
+# ── Lights ───────────────────────────────────────────────────────────────────
+# Key light (warm, upper-front-right)
+bpy.ops.object.light_add(type='SUN', location=center + mathutils.Vector([size * 1.5, -size * 0.5, size * 1.5]))
+key = bpy.context.active_object
+key.data.energy = 5.0
+key.data.color  = (1.0, 0.95, 0.88)
+key.data.angle  = math.radians(5)
 
-scene = bpy.context.scene
-scene.render.engine = 'CYCLES'
-scene.cycles.device = 'CPU'
-scene.cycles.samples = 32
-scene.cycles.use_denoising = True
-scene.render.resolution_x = 1280
-scene.render.resolution_y = 720
+# Fill light (cool, left)
+bpy.ops.object.light_add(type='AREA', location=center + mathutils.Vector([-size * 2.0, size * 0.5, size * 0.8]))
+fill = bpy.context.active_object
+fill.data.energy = 200.0 * size * size
+fill.data.color  = (0.7, 0.8, 1.0)
+fill.data.size   = size * 2.0
+fill_dir = center - fill.location
+fill.rotation_euler = fill_dir.to_track_quat('-Z', 'Y').to_euler()
+
+# Rim / back light
+bpy.ops.object.light_add(type='SUN', location=center + mathutils.Vector([0.0, size * 2.0, size * 1.0]))
+rim = bpy.context.active_object
+rim.data.energy = 1.5
+rim.data.color  = (0.9, 0.95, 1.0)
+
+# ── Render settings ──────────────────────────────────────────────────────────
+# EEVEE Next (Vulkan) — launched with --gpu-backend vulkan so Blender uses the
+# Mesa Vulkan stack (ANV/RADV/Lavapipe) rather than OpenGL.
+try:
+    scene.render.engine = 'BLENDER_EEVEE_NEXT'
+except Exception:
+    scene.render.engine = 'BLENDER_EEVEE'
+
+# Tone mapping: prefer Filmic, fall back to AgX (Blender 5.0 default)
+for _transform, _look in [('Filmic', 'Medium Contrast'), ('AgX', 'None')]:
+    try:
+        scene.view_settings.view_transform = _transform
+        scene.view_settings.look           = _look
+        break
+    except TypeError:
+        pass
+scene.view_settings.exposure = 0.0
+scene.view_settings.gamma    = 1.0
+
+scene.render.resolution_x             = 1280
+scene.render.resolution_y             = 720
 scene.render.image_settings.file_format = 'PNG'
-scene.render.filepath = output_path
+scene.render.filepath                  = output_path
 
 try:
     bpy.ops.render.render(write_still=True)
@@ -1225,7 +1349,7 @@ async fn process_object_3d(concept_id: String, db: &db::ScyllaDb, upload_path: &
 
     let render_result = task::spawn_blocking(move || {
         let cmd = format!(
-            "blender --background --python '{}' -- '{}' '{}'",
+            "blender --background --gpu-backend vulkan --python '{}' -- '{}' '{}'",
             script_path_t, glb_path_t, thumbnail_png_t
         );
         println!("Rendering 3D thumbnail: {}", cmd);
@@ -1291,6 +1415,167 @@ async fn process_object_3d(concept_id: String, db: &db::ScyllaDb, upload_path: &
     let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&concept_id,)).await;
     let _ = fs::remove_file(&input_file);
 
+    Ok(())
+}
+
+/// Blender Python script: embed uploaded textures into an existing GLB.
+/// Textures are matched to PBR slots by filename keywords
+/// (albedo/diffuse/color → Base Color, normal → Normal map, roughness, metallic, ao, emission).
+const BLENDER_EMBED_TEXTURES_SCRIPT: &str = r#"
+import bpy, sys, os
+
+argv = sys.argv
+try:
+    sep = argv.index("--")
+    args = argv[sep + 1:]
+except ValueError:
+    print("Usage: blender --background --python script.py -- <model.glb> <textures_dir>", file=sys.stderr)
+    sys.exit(1)
+
+model_path = args[0]
+textures_dir = args[1]
+
+IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga'}
+
+texture_files = [
+    f for f in os.listdir(textures_dir)
+    if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+]
+
+if not texture_files:
+    print("No texture files found in textures directory", file=sys.stderr)
+    sys.exit(1)
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+
+try:
+    bpy.ops.import_scene.gltf(filepath=model_path)
+except Exception as e:
+    print(f"Failed to import GLB: {e}", file=sys.stderr)
+    sys.exit(1)
+
+SOCKET_HINTS = {
+    'basecolor': 'Base Color', 'base_color': 'Base Color', 'albedo': 'Base Color',
+    'diffuse': 'Base Color', 'color': 'Base Color', 'col': 'Base Color',
+    'normal': 'Normal', 'norm': 'Normal', 'nrm': 'Normal', 'nrml': 'Normal',
+    'roughness': 'Roughness', 'rough': 'Roughness', 'rgh': 'Roughness',
+    'metallic': 'Metallic', 'metal': 'Metallic', 'met': 'Metallic',
+    'ao': 'Ambient Occlusion', 'occlusion': 'Ambient Occlusion',
+    'emission': 'Emission Color', 'emissive': 'Emission Color', 'emit': 'Emission Color',
+}
+
+def get_socket_hint(stem):
+    stem_lower = stem.lower()
+    for key, socket in SOCKET_HINTS.items():
+        if key in stem_lower:
+            return socket
+    return None
+
+def ensure_bsdf(mat):
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    bsdf = nodes.get('Principled BSDF')
+    if bsdf is None:
+        for n in nodes:
+            if n.type == 'BSDF_PRINCIPLED':
+                bsdf = n
+                break
+    if bsdf is None:
+        bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+    return mat.node_tree, bsdf
+
+def add_texture_node(mat, img, socket_name, is_non_color=False):
+    tree, bsdf = ensure_bsdf(mat)
+    nodes = tree.nodes
+    links = tree.links
+    tex_node = nodes.new('ShaderNodeTexImage')
+    tex_node.image = img
+    if is_non_color:
+        tex_node.image.colorspace_settings.name = 'Non-Color'
+    if socket_name == 'Normal':
+        norm_node = nodes.new('ShaderNodeNormalMap')
+        links.new(tex_node.outputs['Color'], norm_node.inputs['Color'])
+        links.new(norm_node.outputs['Normal'], bsdf.inputs['Normal'])
+    elif socket_name in bsdf.inputs:
+        links.new(tex_node.outputs['Color'], bsdf.inputs[socket_name])
+
+all_materials = [m for m in bpy.data.materials if m and not m.name.startswith('.')]
+
+for tex_file in texture_files:
+    tex_path = os.path.join(textures_dir, tex_file)
+    stem = os.path.splitext(tex_file)[0]
+    socket_name = get_socket_hint(stem) or 'Base Color'
+    is_non_color = socket_name in ('Normal', 'Roughness', 'Metallic', 'Ambient Occlusion')
+    img = bpy.data.images.load(tex_path)
+
+    applied = False
+    for mat in all_materials:
+        mat.use_nodes = True
+        _, bsdf = ensure_bsdf(mat)
+        sock = bsdf.inputs.get(socket_name)
+        if sock is not None and not sock.is_linked:
+            add_texture_node(mat, img, socket_name, is_non_color)
+            applied = True
+            print(f"Applied {tex_file} -> {socket_name} on '{mat.name}'")
+
+    if not applied:
+        for mat in all_materials:
+            mat.use_nodes = True
+            add_texture_node(mat, img, socket_name, is_non_color)
+            print(f"Force-applied {tex_file} -> {socket_name} on '{mat.name}'")
+            break
+
+try:
+    bpy.ops.export_scene.gltf(filepath=model_path, export_format='GLB')
+    print(f"Exported GLB with embedded textures to {model_path}")
+except Exception as e:
+    print(f"Export failed: {e}", file=sys.stderr)
+    sys.exit(1)
+"#;
+
+async fn process_object_3d_retexture(medium_id: String, db: &db::ScyllaDb, source_path: &str) -> Result<(), String> {
+    let source_dir = format!("{}/{}", source_path, medium_id);
+    let glb_path = format!("{}/model.glb", source_dir);
+    let textures_dir = format!("{}/textures", source_dir);
+
+    if !std::path::Path::new(&glb_path).exists() {
+        let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&medium_id,)).await;
+        return Err(format!("model.glb not found at {}", glb_path));
+    }
+
+    if !std::path::Path::new(&textures_dir).exists() {
+        let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&medium_id,)).await;
+        return Err(format!("textures directory not found at {}", textures_dir));
+    }
+
+    let script_path = format!("{}/.tmp_embed_textures.py", source_dir);
+    fs::write(&script_path, BLENDER_EMBED_TEXTURES_SCRIPT)
+        .map_err(|e| format!("Failed to write Blender script: {}", e))?;
+
+    let script_path_c = script_path.clone();
+    let glb_path_c = glb_path.clone();
+    let textures_dir_c = textures_dir.clone();
+
+    let result = task::spawn_blocking(move || {
+        let cmd = format!(
+            "blender --background --python '{}' -- '{}' '{}'",
+            script_path_c, glb_path_c, textures_dir_c
+        );
+        println!("Embedding textures into GLB: {}", cmd);
+        Command::new("sh").arg("-c").arg(&cmd).status()
+    }).await
+    .map_err(|e| format!("Blender task panicked: {}", e))?
+    .map_err(|e| format!("Failed to spawn blender: {}", e))?;
+
+    let _ = fs::remove_file(&script_path);
+
+    if !result.success() {
+        let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&medium_id,)).await;
+        return Err(format!("Blender exited with code {:?}", result.code()));
+    }
+
+    println!("Retexture complete for medium: {}", medium_id);
+    let _ = db.session.execute_unpaged(&db.delete_unprocessed_concept, (&medium_id,)).await;
     Ok(())
 }
 
