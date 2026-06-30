@@ -375,36 +375,6 @@ fn default_thumbnail_config() -> ThumbnailConfig {
 }
 
 #[derive(Deserialize, Clone, Debug)]
-struct ShowcaseConfig {
-    #[serde(default = "default_showcase_width")]
-    width: u32,
-    #[serde(default = "default_showcase_fps")]
-    fps: u32,
-    #[serde(default = "default_showcase_max_frames")]
-    max_frames: u32,
-    #[serde(default = "default_showcase_quality")]
-    quality: u32,
-    #[serde(default = "default_showcase_cpu_used")]
-    cpu_used: u32,
-}
-
-fn default_showcase_width() -> u32 { 480 }
-fn default_showcase_fps() -> u32 { 2 }
-fn default_showcase_max_frames() -> u32 { 60 }
-fn default_showcase_quality() -> u32 { 40 }
-fn default_showcase_cpu_used() -> u32 { 2 }
-
-fn default_showcase_config() -> ShowcaseConfig {
-    ShowcaseConfig {
-        width: default_showcase_width(),
-        fps: default_showcase_fps(),
-        max_frames: default_showcase_max_frames(),
-        quality: default_showcase_quality(),
-        cpu_used: default_showcase_cpu_used(),
-    }
-}
-
-#[derive(Deserialize, Clone, Debug)]
 struct PreviewSpriteConfig {
     #[serde(default = "default_preview_interval_seconds")]
     interval_seconds: f64,
@@ -491,8 +461,6 @@ struct VideoConfig {
     dash: DashConfig,
     #[serde(default = "default_thumbnail_config")]
     thumbnail: ThumbnailConfig,
-    #[serde(default = "default_showcase_config")]
-    showcase: ShowcaseConfig,
     #[serde(default = "default_preview_sprite_config")]
     preview_sprites: PreviewSpriteConfig,
 }
@@ -4776,7 +4744,7 @@ async fn transcode_video(
         }
     }
 
-    // Generate thumbnails, showcase, and preview sprites all in parallel
+    // Generate thumbnails and preview sprites in parallel
     let random_time = if duration > 0.1 {
         rand::rng().random_range(0.0..duration)
     } else {
@@ -4810,7 +4778,7 @@ async fn transcode_video(
         num_sprite_files, num_thumbnails, max_sprites_per_file
     );
 
-    // Spawn all post-processing tasks in parallel: JPG thumbnail, AVIF thumbnail, showcase, and all sprite files
+    // Spawn all post-processing tasks in parallel: JPG and AVIF thumbnails
     let mut post_handles: Vec<task::JoinHandle<()>> = Vec::new();
 
     // JPG thumbnail
@@ -4841,28 +4809,6 @@ async fn transcode_video(
     post_handles.push(task::spawn_blocking(move || {
         println!("Executing: {}", thumbnail_sm_avif_cmd);
         let _ = Command::new("sh").arg("-c").arg(&thumbnail_sm_avif_cmd).status();
-    }));
-
-    // Animated showcase.avif
-    let showcase_cmd = format!(
-        "ffmpeg -nostdin -y -i '{}' -vf 'scale={}:-2,fps={},format=yuv420p10le' -frames:v {} -c:v libaom-av1 -pix_fmt yuv420p10le -q:v {} -cpu-used {} -row-mt 1 '{}/showcase.avif'",
-        input_file, config.showcase.width, config.showcase.fps, config.showcase.max_frames, config.showcase.quality, config.showcase.cpu_used, output_dir
-    );
-    post_handles.push(task::spawn_blocking(move || {
-        println!("Generating showcase.avif...");
-        println!("Executing: {}", showcase_cmd);
-        let showcase_status = Command::new("sh").arg("-c").arg(&showcase_cmd).status();
-        match showcase_status {
-            Ok(status) if status.success() => {
-                println!("showcase.avif generated successfully");
-            }
-            Ok(status) => {
-                eprintln!("Warning: showcase.avif generation failed with exit code: {:?}", status.code());
-            }
-            Err(e) => {
-                eprintln!("Warning: Failed to execute showcase command: {}", e);
-            }
-        }
     }));
 
     // Sprite files with throttled parallelism
@@ -4915,7 +4861,7 @@ async fn transcode_video(
         }));
     }
 
-    // Wait for all post-processing tasks to complete (thumbnails + showcase)
+    // Wait for all thumbnail generation tasks to complete
     for handle in post_handles {
         let _ = handle.await;
     }

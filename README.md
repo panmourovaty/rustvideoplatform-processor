@@ -295,18 +295,6 @@ Video thumbnail dimensions (JPEG).
 | `width` | `1920` | Maximum thumbnail width |
 | `height` | `1080` | Maximum thumbnail height |
 
-#### `video.showcase`
-
-Animated AVIF preview generation.
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `width` | `480` | Output width (height scales proportionally) |
-| `fps` | `2` | Frame rate |
-| `max_frames` | `60` | Maximum number of frames |
-| `quality` | `40` | AV1 quality level (`q:v`) |
-| `cpu_used` | `2` | libaom-av1 `cpu-used` setting (higher = faster) |
-
 #### `video.preview_sprites`
 
 Thumbnail sprite sheets for seek preview.

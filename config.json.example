@@ -113,13 +113,6 @@
             "width": 1920,
             "height": 1080
         },
-        "showcase": {
-            "width": 480,
-            "fps": 2,
-            "max_frames": 60,
-            "quality": 40,
-            "cpu_used": 2
-        },
         "preview_sprites": {
             "interval_seconds": 5.0,
             "thumb_width": 640,
